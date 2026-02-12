@@ -1,0 +1,59 @@
+plugins {
+    id 'java-library'                     // Java 库专用插件
+}
+
+group = 'com.github.ohhapple' // ⚠️ 替换为你的 GitHub 用户名（小写）
+version = '1.0.0'                        // 版本号，最终会被 git tag 覆盖，但这里写一个默认值
+
+java {
+//    withSourcesJar()                     // ⚠️ 强烈推荐：生成源码 jar，方便用户调试
+//    withJavadocJar()                    // 可选，生成 javadoc jar
+    sourceCompatibility = JavaVersion.VERSION_25  // 根据你的 JDK 版本调整
+    targetCompatibility = JavaVersion.VERSION_25
+}
+
+repositories {
+    mavenCentral()                       // 你的依赖从这里下载
+//    maven {
+//        url = 'https://jitpack.io'
+//    }
+}
+
+dependencies {
+    // ----- 版本统一管理（必加）-----
+    api platform("org.lwjgl:lwjgl-bom:3.3.3")
+
+    // ----- 核心模块（全部用 api，因为你是在封装给别人用）-----
+    api "org.lwjgl:lwjgl"
+    api "org.lwjgl:lwjgl-glfw"
+    api "org.lwjgl:lwjgl-opengl"
+    api "org.lwjgl:lwjgl-stb"
+    api "org.lwjgl:lwjgl-freetype"      // ← 就是你刚加的那行 import 需要的
+
+    // ----- 全平台 natives（你的用户零配置，开箱即用）-----
+    runtimeOnly "org.lwjgl:lwjgl::natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl::natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl::natives-macos"
+    runtimeOnly "org.lwjgl:lwjgl-glfw::natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-glfw::natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-glfw::natives-macos"
+    runtimeOnly "org.lwjgl:lwjgl-opengl::natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-opengl::natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-opengl::natives-macos"
+    runtimeOnly "org.lwjgl:lwjgl-stb::natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-stb::natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-stb::natives-macos"
+    runtimeOnly "org.lwjgl:lwjgl-freetype::natives-windows"   // ← FreeType natives
+    runtimeOnly "org.lwjgl:lwjgl-freetype::natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-freetype::natives-macos"
+}
+
+// 确保生成的 jar 包不含重复或多余文件
+tasks.named('jar') {
+    manifest {
+        attributes(
+                'Implementation-Title': project.name,
+                'Implementation-Version': project.version
+        )
+    }
+}
