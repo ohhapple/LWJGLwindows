@@ -8,8 +8,8 @@ version = '1.0.0'                        // 版本号，最终会被 git tag 覆
 java {
     withSourcesJar()                     // ⚠️ 强烈推荐：生成源码 jar，方便用户调试
     withJavadocJar()                    // 可选，生成 javadoc jar
-    sourceCompatibility = JavaVersion.VERSION_25  // 根据你的 JDK 版本调整
-    targetCompatibility = JavaVersion.VERSION_25
+    sourceCompatibility = JavaVersion.VERSION_21  // 根据你的 JDK 版本调整
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 repositories {
