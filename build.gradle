@@ -12,11 +12,14 @@ java {
     targetCompatibility = JavaVersion.VERSION_21
 }
 
+tasks.named('sourcesJar') {
+    // 确保每次构建都重新生成源码包
+    outputs.upToDateWhen { false }
+    dependsOn compileJava
+}
+
 repositories {
     mavenCentral()                       // 你的依赖从这里下载
-//    maven {
-//        url = 'https://jitpack.io'
-//    }
 }
 
 dependencies {
