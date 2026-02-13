@@ -1,21 +1,5 @@
 /*
- * This file is part of the CarpetPlus project, licensed under the
- * GNU Lesser General Public License v3.0
- *
- * Copyright (C) 2026 ohhapple and contributors
- *
- * CarpetPlus is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * CarpetPlus is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with CarpetPlus. If not, see <https://www.gnu.org/licenses/>.
+ * Copyright (C) 2026 ohhapple
  */
 
 package com.ohhapple.gui.Font;
@@ -36,11 +20,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * 独立窗口字体渲染器
  * 特性：
  * - 支持动态指定字体大小（像素）
- * - 纹理格式 GL_ALPHA，完美透明背景
- * - 像素对齐 (UNPACK_ALIGNMENT=1)，彻底消除扭曲
+ * - 纹理格式 GL_ALPHA，透明背景
+ * - 像素对齐 (UNPACK_ALIGNMENT=1)，消除扭曲
  * - 强制像素宽高相等，无拉伸
  * - 整数坐标 + GL_NEAREST，边缘锐利
- * - 按 (字符, 字号) 双键缓存，永不崩溃
+ * - 按 (字符, 字号) 双键缓存
  */
 public class FontRenderer {
     private static long library;
@@ -115,7 +99,7 @@ public class FontRenderer {
             }
 
             fontBuffer = loadFontFile();
-            if (fontBuffer == null) throw new RuntimeException("无法加载字体文件: assets/carpetplus/font/simhei.ttf");
+            if (fontBuffer == null) throw new RuntimeException("无法加载字体文件: assets/LWJGLwindows/font/simhei.ttf");
 
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 PointerBuffer faceBuf = stack.mallocPointer(1);
@@ -216,9 +200,9 @@ public class FontRenderer {
     // ----------------------------------------------------------------------
 
     private static ByteBuffer loadFontFile() {
-        InputStream is = FontRenderer.class.getResourceAsStream("/assets/carpetplus/font/simhei.ttf");
+        InputStream is = FontRenderer.class.getResourceAsStream("/assets/LWJGLwindows/font/simhei.ttf");
         if (is == null) {
-            is = FontRenderer.class.getClassLoader().getResourceAsStream("assets/carpetplus/font/simhei.ttf");
+            is = FontRenderer.class.getClassLoader().getResourceAsStream("assets/LWJGLwindows/font/simhei.ttf");
         }
         if (is == null) return null;
         try (InputStream stream = is) {
