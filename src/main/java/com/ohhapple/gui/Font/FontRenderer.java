@@ -7,6 +7,7 @@ package com.ohhapple.gui.Font;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL12;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.util.freetype.*;
 
@@ -17,27 +18,22 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 独立窗口字体渲染器
- * 特性：
- * - 支持动态指定字体大小（像素）
- * - 纹理格式 GL_ALPHA，透明背景
- * - 像素对齐 (UNPACK_ALIGNMENT=1)，消除扭曲
- * - 强制像素宽高相等，无拉伸
- * - 整数坐标 + GL_NEAREST，边缘锐利
- * - 按 (字符, 字号) 双键缓存
+ * 独立窗口字体渲染器（实例版本，每个窗口独立）
  */
 public class FontRenderer {
-    private static long library;
-    private static FT_Face face;
-    private static ByteBuffer fontBuffer;   // 必须静态持有
+    private long library;
+    private FT_Face face;
+    private ByteBuffer fontBuffer;
+    private final ConcurrentHashMap<GlyphKey, Glyph> glyphCache = new ConcurrentHashMap<>();
+    private boolean initialized = false;
 
     // 默认字体大小（像素）
     public static final int DEFAULT_FONT_SIZE = 24;
 
-    private static float ascender;
-    private static float descender;
+    private float ascender;
+    private float descender;
     @SuppressWarnings("unused")
-    private static float lineHeight;
+    private float lineHeight;
 
     // 缓存键：字符 + 像素大小
     private static final class GlyphKey {
@@ -63,11 +59,6 @@ public class FontRenderer {
         }
     }
 
-    private static final ConcurrentHashMap<GlyphKey, Glyph> glyphCache = new ConcurrentHashMap<>();
-
-    private static volatile boolean initialized = false;
-    private static final Object initLock = new Object();
-
     private static class Glyph {
         final int textureId;
         final int width;
@@ -86,52 +77,54 @@ public class FontRenderer {
         }
     }
 
-    public static void init() {
+    public void init() {
         if (initialized) return;
-        synchronized (initLock) {
-            if (initialized) return;
 
-            try (MemoryStack stack = MemoryStack.stackPush()) {
-                PointerBuffer libBuf = stack.mallocPointer(1);
-                int error = FreeType.FT_Init_FreeType(libBuf);
-                if (error != 0) throw new RuntimeException("FT_Init_FreeType 失败，错误码: " + error);
-                library = libBuf.get(0);
-            }
-
-            fontBuffer = loadFontFile();
-            if (fontBuffer == null) throw new RuntimeException("无法加载字体文件: assets/LWJGLwindows/font/simhei.ttf");
-
-            try (MemoryStack stack = MemoryStack.stackPush()) {
-                PointerBuffer faceBuf = stack.mallocPointer(1);
-                int error = FreeType.FT_New_Memory_Face(library, fontBuffer, 0, faceBuf);
-                if (error != 0) throw new RuntimeException("FT_New_Memory_Face 失败，错误码: " + error);
-                face = FT_Face.create(faceBuf.get(0));
-            }
-
-            // 注意：不再设置全局像素大小，而是在加载具体字符时动态设置
-            // 但我们需要获取字体度量信息（升部、降部）——使用默认大小先初始化一次
-            FreeType.FT_Set_Pixel_Sizes(face, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
-            FT_Size size = face.size();
-            FT_Size_Metrics metrics = size.metrics();
-            ascender = ((float) metrics.ascender()) / 64f;
-            descender = ((float) metrics.descender()) / 64f;
-            lineHeight = ascender - descender;
-
-            // 预生成 ASCII 字符（默认大小）
-            for (int c = 32; c < 127; c++) getOrCreateGlyph((char) c, DEFAULT_FONT_SIZE);
-
-            initialized = true;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            PointerBuffer libBuf = stack.mallocPointer(1);
+            int error = FreeType.FT_Init_FreeType(libBuf);
+            if (error != 0) throw new RuntimeException("FT_Init_FreeType 失败，错误码: " + error);
+            library = libBuf.get(0);
         }
+
+        fontBuffer = loadFontFile();
+        if (fontBuffer == null) throw new RuntimeException("无法加载字体文件: assets/LWJGLwindows/font/simhei.ttf");
+
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            PointerBuffer faceBuf = stack.mallocPointer(1);
+            int error = FreeType.FT_New_Memory_Face(library, fontBuffer, 0, faceBuf);
+            if (error != 0) throw new RuntimeException("FT_New_Memory_Face 失败，错误码: " + error);
+            face = FT_Face.create(faceBuf.get(0));
+        }
+
+        // 获取字体度量信息（使用默认大小）
+        FreeType.FT_Set_Pixel_Sizes(face, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
+        FT_Size size = face.size();
+        FT_Size_Metrics metrics = size.metrics();
+        ascender = ((float) metrics.ascender()) / 64f;
+        descender = ((float) metrics.descender()) / 64f;
+        lineHeight = ascender - descender;
+
+        // 预生成 ASCII 字符（默认大小）
+        for (int c = 32; c < 127; c++) getOrCreateGlyph((char) c, DEFAULT_FONT_SIZE);
+
+        initialized = true;
     }
 
-    public static void cleanup() {
+    public void cleanup() {
         if (!initialized) return;
         for (Glyph glyph : glyphCache.values()) {
             if (glyph.textureId != 0) GL11.glDeleteTextures(glyph.textureId);
         }
         glyphCache.clear();
-        if (face != null) { FreeType.FT_Done_Face(face); face = null; }
-        if (library != 0) { FreeType.FT_Done_FreeType(library); library = 0; }
+        if (face != null) {
+            FreeType.FT_Done_Face(face);
+            face = null;
+        }
+        if (library != 0) {
+            FreeType.FT_Done_FreeType(library);
+            library = 0;
+        }
         fontBuffer = null;
         initialized = false;
     }
@@ -143,18 +136,17 @@ public class FontRenderer {
     /**
      * 使用默认字号 (24) 绘制居中文本
      */
-    public static void drawText(long win, String text, float x, float y, float r, float g, float b) {
+    public void drawText(long win, String text, float x, float y, float r, float g, float b) {
         drawText(win, text, x, y, DEFAULT_FONT_SIZE, r, g, b);
     }
 
     /**
      * 指定字号绘制居中文本
      */
-    public static void drawText(long win, String text, float x, float y, int fontSize, float r, float g, float b) {
+    public void drawText(long win, String text, float x, float y, int fontSize, float r, float g, float b) {
         if (!initialized || text == null || text.isEmpty()) return;
         float totalWidth = calculateTextWidth(text, fontSize);
         float startX = x - totalWidth / 2f;
-        // 基线对齐：需要根据当前字号重新计算度量值
         float baselineY = y + (getAscender(fontSize) + getDescender(fontSize)) / 2f;
         drawStringInternal(text, startX, baselineY, fontSize, r, g, b);
     }
@@ -162,14 +154,14 @@ public class FontRenderer {
     /**
      * 使用默认字号 (24) 绘制左对齐文本
      */
-    public static void drawLeftAlignedText(long win, String text, float x, float y, float r, float g, float b) {
+    public void drawLeftAlignedText(long win, String text, float x, float y, float r, float g, float b) {
         drawLeftAlignedText(win, text, x, y, DEFAULT_FONT_SIZE, r, g, b);
     }
 
     /**
      * 指定字号绘制左对齐文本
      */
-    public static void drawLeftAlignedText(long win, String text, float x, float y, int fontSize, float r, float g, float b) {
+    public void drawLeftAlignedText(long win, String text, float x, float y, int fontSize, float r, float g, float b) {
         if (!initialized || text == null || text.isEmpty()) return;
         float baselineY = y + (getAscender(fontSize) + getDescender(fontSize)) / 2f;
         drawStringInternal(text, x, baselineY, fontSize, r, g, b);
@@ -178,14 +170,14 @@ public class FontRenderer {
     /**
      * 使用默认字号 (24) 计算文本宽度
      */
-    public static int calculateTextWidth(String text) {
+    public int calculateTextWidth(String text) {
         return calculateTextWidth(text, DEFAULT_FONT_SIZE);
     }
 
     /**
      * 指定字号计算文本宽度
      */
-    public static int calculateTextWidth(String text, int fontSize) {
+    public int calculateTextWidth(String text, int fontSize) {
         if (text == null || text.isEmpty()) return 0;
         int width = 0;
         for (char c : text.toCharArray()) {
@@ -199,7 +191,7 @@ public class FontRenderer {
     // 内部实现
     // ----------------------------------------------------------------------
 
-    private static ByteBuffer loadFontFile() {
+    private ByteBuffer loadFontFile() {
         InputStream is = FontRenderer.class.getResourceAsStream("/assets/LWJGLwindows/font/simhei.ttf");
         if (is == null) {
             is = FontRenderer.class.getClassLoader().getResourceAsStream("assets/LWJGLwindows/font/simhei.ttf");
@@ -220,32 +212,50 @@ public class FontRenderer {
     /**
      * 获取特定字符在特定像素大小下的字形（缓存）
      */
-    private static Glyph getOrCreateGlyph(char c, int size) {
+    private Glyph getOrCreateGlyph(char c, int size) {
         GlyphKey key = new GlyphKey(c, size);
         Glyph glyph = glyphCache.get(key);
         if (glyph != null) return glyph;
 
-        synchronized (FontRenderer.class) {
+        synchronized (this) {
             glyph = glyphCache.get(key);
             if (glyph != null) return glyph;
 
             if (face == null) throw new IllegalStateException("字体未初始化");
 
-            // ★ 关键：设置当前需要的像素大小
             int error = FreeType.FT_Set_Pixel_Sizes(face, size, size);
             if (error != 0) {
-                // 设置大小失败，回退到默认大小
                 FreeType.FT_Set_Pixel_Sizes(face, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
             }
 
+            // 尝试获取字符索引，若失败则尝试 '?'，再失败则尝试空格，若空格也失败则返回默认空字形（避免递归）
             int glyphIndex = FreeType.FT_Get_Char_Index(face, c);
             if (glyphIndex == 0) {
                 glyphIndex = FreeType.FT_Get_Char_Index(face, '?');
-                if (glyphIndex == 0) return getOrCreateGlyph(' ', size);
+            }
+            if (glyphIndex == 0) {
+                glyphIndex = FreeType.FT_Get_Char_Index(face, ' ');
+            }
+            if (glyphIndex == 0) {
+                // 完全无法获取有效字形，返回一个占位符（宽度为size/2，高度为size的空白纹理）
+                int placeholderTex = GL11.glGenTextures();
+                int w = size / 2, h = size;
+                ByteBuffer empty = ByteBuffer.allocateDirect(w * h);
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, placeholderTex);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+                GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_ALPHA, w, h, 0, GL11.GL_ALPHA, GL11.GL_UNSIGNED_BYTE, empty);
+                GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+                glyph = new Glyph(placeholderTex, w, h, 0, 0, w);
+                glyphCache.put(key, glyph);
+                return glyph;
             }
 
             error = FreeType.FT_Load_Glyph(face, glyphIndex, FreeType.FT_LOAD_DEFAULT);
-            if (error != 0) return getOrCreateGlyph(' ', size);
+            if (error != 0) return getOrCreateGlyph(' ', size); // 此处递归最多一次，因为上面已确保空格存在
 
             FT_GlyphSlot slot = face.glyph();
             error = FreeType.FT_Render_Glyph(slot, FreeType.FT_RENDER_MODE_NORMAL);
@@ -264,8 +274,8 @@ public class FontRenderer {
                 if (buffer != null) {
                     textureId = GL11.glGenTextures();
                     GL11.glBindTexture(GL11.GL_TEXTURE_2D, textureId);
-                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL11.GL_CLAMP);
-                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL11.GL_CLAMP);
+                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
                     GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
                     GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
 
@@ -285,8 +295,8 @@ public class FontRenderer {
     /**
      * 内部绘制字符串（已处理基线）
      */
-    private static void drawStringInternal(String text, float startX, float baselineY, int fontSize,
-                                           float r, float g, float b) {
+    private void drawStringInternal(String text, float startX, float baselineY, int fontSize,
+                                    float r, float g, float b) {
         GL11.glColor4f(r, g, b, 1.0f);
         GL11.glEnable(GL11.GL_TEXTURE_2D);
         GL11.glEnable(GL11.GL_BLEND);
@@ -322,16 +332,14 @@ public class FontRenderer {
     /**
      * 获取特定字号下的升部（像素）
      */
-    private static float getAscender(int fontSize) {
-        // 由于我们动态设置大小，度量值也需要缩放
-        // 简单方案：使用默认大小度量值按比例缩放
+    private float getAscender(int fontSize) {
         return ascender * fontSize / DEFAULT_FONT_SIZE;
     }
 
     /**
      * 获取特定字号下的降部（像素）
      */
-    private static float getDescender(int fontSize) {
+    private float getDescender(int fontSize) {
         return descender * fontSize / DEFAULT_FONT_SIZE;
     }
 }

@@ -5,8 +5,7 @@
 package com.ohhapple.gui.util;
 
 import com.ohhapple.gui.Font.FontRenderer;
-import org.lwjgl.glfw.GLFW;
-import org.lwjgl.glfw.GLFWImage;
+import org.lwjgl.glfw.*;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryStack;
@@ -24,8 +23,8 @@ public abstract class BaseGuiWindow {
     // -------------------- 依赖注入 --------------------
     protected final IMinecraftAccess mc;
     protected final String title;
-    public int windowWidth;
-    public int windowHeight;
+    public volatile int windowWidth;
+    public volatile int windowHeight;
 
     // -------------------- 窗口状态 --------------------
     private final AtomicBoolean isOpen = new AtomicBoolean(false);
@@ -40,10 +39,8 @@ public abstract class BaseGuiWindow {
 
     // -------------------- UI 组件管理 --------------------
     protected final List<UIComponent> uiComponents = new CopyOnWriteArrayList<>();
-    protected UIComponent hoveredComponent;
-
-    // ★★★★★ 完全还原原始：public 字段，外部可直接读写 ★★★★★
-    public UIComponent focusedComponent;
+    protected volatile UIComponent hoveredComponent;
+    public volatile UIComponent focusedComponent;  // 外部可直接读写
 
     protected float lastMouseX, lastMouseY;
 
@@ -51,9 +48,26 @@ public abstract class BaseGuiWindow {
     protected static String windowIconPath = null;
     public static void setWindowIcon(String resourcePath) { windowIconPath = resourcePath; }
 
-    // -------------------- 窗口背景色（新增）--------------------
-    private float bgR = 0.1f, bgG = 0.1f, bgB = 0.15f; // 默认深蓝灰
+    // -------------------- 窗口背景色 --------------------
+    private float bgR = 0.1f, bgG = 0.1f, bgB = 0.15f;
     public void setBackgroundColor(float r, float g, float b) { bgR = r; bgG = g; bgB = b; }
+
+    // -------------------- 字体渲染器（每个窗口独立，public 以便外部访问） --------------------
+    public FontRenderer fontRenderer;
+
+    // -------------------- GLFW 回调对象（必须持有） --------------------
+    private GLFWWindowCloseCallback windowCloseCallback;
+    private GLFWCursorPosCallback cursorPosCallback;
+    private GLFWMouseButtonCallback mouseButtonCallback;
+    private GLFWScrollCallback scrollCallback;
+    private GLFWKeyCallback keyCallback;
+    private GLFWCharCallback charCallback;
+    private GLFWWindowSizeCallback windowSizeCallback;
+    // 自定义错误回调，避免触发 Minecraft 的线程检查
+    private GLFWErrorCallback customErrorCallback;
+
+    // -------------------- OpenGL 能力创建标志（每个线程只创建一次） --------------------
+    private boolean glCapabilitiesCreated = false;
 
     // -------------------- 构造方法 --------------------
     public BaseGuiWindow(IMinecraftAccess mc, String title, int width, int height) {
@@ -93,7 +107,7 @@ public abstract class BaseGuiWindow {
     public final void removeComponent(UIComponent comp) { uiComponents.remove(comp); }
     public final void clearComponents() { uiComponents.clear(); }
 
-    // -------------------- 窗口创建（内部）--------------------
+    // -------------------- 窗口创建（内部，在主线程执行）--------------------
     private void createWindowInRenderThread() {
         if (!handleFetched.get()) {
             synchronized (handleLock) {
@@ -112,6 +126,11 @@ public abstract class BaseGuiWindow {
         GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 1);
         GLFW.glfwWindowHint(GLFW.GLFW_ALPHA_BITS, 8);
         GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, 4);
+
+        // Wayland 平台特殊处理：必须在窗口创建前设置 APP_ID
+        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
+            GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "LWJGLwindows");
+        }
 
         long newWindow = GLFW.glfwCreateWindow(windowWidth, windowHeight, title, 0, mainWindow);
         if (newWindow == 0) { isOpen.set(false); return; }
@@ -137,6 +156,8 @@ public abstract class BaseGuiWindow {
         isCreated.set(true);
         GLFW.glfwShowWindow(newWindow);
 
+        // 注意：此处不再设置 OpenGL 上下文，全部留给渲染线程处理
+        // 只初始化 UI 组件（组件初始化不依赖 OpenGL）
         initUIComponents();
         relayoutComponents(windowWidth, windowHeight);
         startRenderLoop();
@@ -146,9 +167,9 @@ public abstract class BaseGuiWindow {
         if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_COCOA) {
             System.out.println("[GUI] macOS 窗口不支持自定义图标，已跳过"); return;
         }
+        // Wayland 平台已在创建窗口前设置 APP_ID，无需再次设置图标
         if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
-            GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "carpetplus");
-            System.out.println("[GUI] Wayland 平台：设置 APP_ID = carpetplus"); return;
+            return;
         }
         try (IconLoader icon = IconLoader.loadFromResources(iconPath)) {
             GLFWImage glfwImage = GLFWImage.malloc();
@@ -168,28 +189,48 @@ public abstract class BaseGuiWindow {
         renderThread.start();
     }
 
+    // 优化后的渲染循环：使用 glfwWaitEventsTimeout 替代 glfwPollEvents
     private void renderLoop() {
         long handle = windowHandle.get();
         if (handle == 0) return;
 
+        // 设置当前上下文（必须在渲染线程中进行）
         GLFW.glfwMakeContextCurrent(handle);
-        GL.createCapabilities();
-        GLFW.glfwSwapInterval(1);
 
-        FontRenderer.init();
+        // 初始化 OpenGL 能力（只做一次）
+        if (!glCapabilitiesCreated) {
+            GL.createCapabilities();
+            glCapabilitiesCreated = true;
+        }
+
+        // 初始化字体渲染器（需要 OpenGL 上下文）
+        if (fontRenderer == null) {
+            fontRenderer = new FontRenderer();
+            fontRenderer.init();
+        }
+
+        // 启用垂直同步
+        GLFW.glfwSwapInterval(1);
 
         GL11.glEnable(GL11.GL_BLEND);
         GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
         GL11.glDisable(GL11.GL_DEPTH_TEST);
         GL11.glDisable(GL11.GL_CULL_FACE);
-        // ★ 使用可自定义的背景色
         GL11.glClearColor(bgR, bgG, bgB, 1.0f);
 
+        // 设置输入回调（传入当前窗口句柄）
         setupInputCallbacks(handle);
 
-        while (isOpen.get() && !GLFW.glfwWindowShouldClose(handle)) {
-            if (GLFW.glfwGetCurrentContext() != handle) {
-                GLFW.glfwMakeContextCurrent(handle);
+        while (isOpen.get()) {
+            long currentHandle = windowHandle.get();
+            // 双重检查：句柄为0或窗口应关闭时退出
+            if (currentHandle == 0 || GLFW.glfwWindowShouldClose(currentHandle)) {
+                break;
+            }
+
+            // 确保上下文仍然是当前线程的
+            if (GLFW.glfwGetCurrentContext() != currentHandle) {
+                GLFW.glfwMakeContextCurrent(currentHandle);
             }
 
             GL11.glViewport(0, 0, windowWidth, windowHeight);
@@ -200,14 +241,22 @@ public abstract class BaseGuiWindow {
             GL11.glLoadIdentity();
 
             GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
-            renderAll(handle);
+            renderAll(currentHandle);
 
-            GLFW.glfwSwapBuffers(handle);
-            GLFW.glfwPollEvents();
+            GLFW.glfwSwapBuffers(currentHandle);
 
-            try { Thread.sleep(16); } catch (InterruptedException e) { break; }
+            // ★ 优化点：使用 glfwWaitEventsTimeout 替代 glfwPollEvents
+            // 等待事件，最多 16ms。没有事件时线程休眠，大幅降低 CPU 占用
+            GLFW.glfwWaitEventsTimeout(0.016);
         }
 
+        // 渲染循环结束，清理字体渲染器（仍在渲染线程）
+        if (fontRenderer != null) {
+            fontRenderer.cleanup();
+            fontRenderer = null;
+        }
+
+        // 退出循环，清理状态
         GL11.glDisable(GL11.GL_BLEND);
         GL11.glEnable(GL11.GL_DEPTH_TEST);
         GL11.glEnable(GL11.GL_CULL_FACE);
@@ -217,6 +266,7 @@ public abstract class BaseGuiWindow {
         for (UIComponent comp : uiComponents) {
             if (comp instanceof TextField) ((TextField) comp).updateBlink();
             if (comp instanceof ScrollContainer) {
+                // 更新容器内子组件
                 for (UIComponent child : ((ScrollContainer) comp).getChildren()) {
                     if (child instanceof TextField) ((TextField) child).updateBlink();
                 }
@@ -230,36 +280,74 @@ public abstract class BaseGuiWindow {
     private void destroyWindowInRenderThread() {
         long handle = windowHandle.get();
         if (handle == 0) return;
+
+        // 1. 通知渲染循环退出
+        isOpen.set(false);
+        GLFW.glfwSetWindowShouldClose(handle, true);
+
+        // 2. 中断并等待渲染线程结束
         if (renderThread != null && renderThread.isAlive()) {
-            try { renderThread.join(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            renderThread.interrupt();
+            try {
+                renderThread.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
+
+        // 3. 释放 GLFW 回调
+        if (windowCloseCallback != null) { windowCloseCallback.close(); windowCloseCallback = null; }
+        if (cursorPosCallback != null) { cursorPosCallback.close(); cursorPosCallback = null; }
+        if (mouseButtonCallback != null) { mouseButtonCallback.close(); mouseButtonCallback = null; }
+        if (scrollCallback != null) { scrollCallback.close(); scrollCallback = null; }
+        if (keyCallback != null) { keyCallback.close(); keyCallback = null; }
+        if (charCallback != null) { charCallback.close(); charCallback = null; }
+        if (windowSizeCallback != null) { windowSizeCallback.close(); windowSizeCallback = null; }
+
+        // 4. 恢复并清理自定义错误回调
+        if (customErrorCallback != null) {
+            // 恢复原来的错误回调（Minecraft的）
+            GLFW.glfwSetErrorCallback(customErrorCallback);
+            // 注意：不要调用 customErrorCallback.close()，因为那是Minecraft的回调
+            customErrorCallback = null;
+        }
+
+        // 5. 销毁窗口
         GLFW.glfwDestroyWindow(handle);
         windowHandle.set(0L);
         isCreated.set(false);
-        FontRenderer.cleanup();
     }
 
     private void setupInputCallbacks(long handle) {
-        GLFW.glfwSetWindowCloseCallback(handle, w -> close());
-        GLFW.glfwSetCursorPosCallback(handle, (w, x, y) -> {
+        // 保存原始错误回调并设置自定义错误回调，避免GLFW错误触发Minecraft的线程检查
+        customErrorCallback = GLFW.glfwSetErrorCallback((error, description) -> {
+            System.err.println("[GUI GLFW Error] " + error + ": " + description);
+            // 发生错误时自动关闭窗口（避免窗口卡死）
+            // 使用 mc.execute 委托给主线程执行关闭操作，因为错误回调可能在任意线程被调用
+            if (isOpen.get()) {
+                mc.execute(() -> close());
+            }
+        });
+
+        windowCloseCallback = GLFW.glfwSetWindowCloseCallback(handle, w -> close());
+        cursorPosCallback = GLFW.glfwSetCursorPosCallback(handle, (w, x, y) -> {
             lastMouseX = (float) x; lastMouseY = (float) y;
             updateHoveredComponent();
             for (UIComponent comp : uiComponents) {
                 if (comp.handleMouseMove(lastMouseX, lastMouseY, handle)) break;
             }
         });
-        GLFW.glfwSetMouseButtonCallback(handle, (w, btn, act, mods) -> {
+        mouseButtonCallback = GLFW.glfwSetMouseButtonCallback(handle, (w, btn, act, mods) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleMouseClick(lastMouseX, lastMouseY, btn, act, mods, handle)) return;
             }
         });
-        GLFW.glfwSetScrollCallback(handle, (w, xOff, yOff) -> {
+        scrollCallback = GLFW.glfwSetScrollCallback(handle, (w, xOff, yOff) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleMouseScroll(lastMouseX, lastMouseY, (float) xOff, (float) yOff, handle)) break;
             }
         });
-
-        GLFW.glfwSetKeyCallback(handle, (w, key, scancode, act, mods) -> {
+        keyCallback = GLFW.glfwSetKeyCallback(handle, (w, key, scancode, act, mods) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleKeyPress(key, scancode, act, mods, handle)) return;
             }
@@ -267,14 +355,12 @@ public abstract class BaseGuiWindow {
                 if (key == GLFW.GLFW_KEY_ESCAPE) { close(); focusedComponent = null; }
             }
         });
-
-        GLFW.glfwSetCharCallback(handle, (w, codepoint) -> {
+        charCallback = GLFW.glfwSetCharCallback(handle, (w, codepoint) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleCharTyped(codepoint, handle)) return;
             }
         });
-
-        GLFW.glfwSetWindowSizeCallback(handle, (w, width, height) -> {
+        windowSizeCallback = GLFW.glfwSetWindowSizeCallback(handle, (w, width, height) -> {
             windowWidth = width; windowHeight = height;
             relayoutComponents(width, height);
         });
@@ -323,19 +409,17 @@ public abstract class BaseGuiWindow {
 
     public interface Clickable { void onClick(); }
 
-    // ==================== 增强版按钮（全参数构造，支持悬浮边框色）====================
+    // ==================== 增强版按钮 ====================
     public class Button extends UIComponent implements Clickable {
         private final String text;
         private final Runnable action;
         private int fontSize = 24;
         private float textR = 1f, textG = 1f, textB = 1f;
 
-        // 背景色（普通/悬浮）
         private float bgR = 0.3f, bgG = 0.4f, bgB = 0.6f;
         private float bgHoverR = 0.4f, bgHoverG = 0.6f, bgHoverB = 0.8f;
         private float bgAlpha = 0.9f;
 
-        // 边框色（普通/悬浮）
         private float borderR = 1f, borderG = 1f, borderB = 1f;
         private float borderHoverR = 1f, borderHoverG = 1f, borderHoverB = 1f;
         private float borderAlpha = 1f;
@@ -345,14 +429,12 @@ public abstract class BaseGuiWindow {
         public Button(int x, int y, int w, int h, String t, Runnable a, int fontSize) { this(x,y,w,h,t,a); this.fontSize = fontSize; }
         public Button(int x, int y, int w, int h, String t, Runnable a, int fontSize, float tr, float tg, float tb) { this(x,y,w,h,t,a,fontSize); setTextColor(tr,tg,tb); }
 
-        // ★★★ 完整构造方法：普通背景、悬浮背景、普通边框、悬浮边框 ★★★
-        public Button(int x, int y, int w, int h, String t, Runnable a,//x坐标 y坐标 宽度 高度 点击执行事件
-                      int fontSize, float tr, float tg, float tb,//文字大小 文字颜色
-                      float bgR, float bgG, float bgB,//背景颜色
-                      float bgHoverR, float bgHoverG, float bgHoverB,//悬浮背景颜色
-                      float borderR, float borderG, float borderB,//边框颜色
-                      float borderHoverR, float borderHoverG, float borderHoverB)//悬浮边框颜色
-        {
+        public Button(int x, int y, int w, int h, String t, Runnable a,
+                      int fontSize, float tr, float tg, float tb,
+                      float bgR, float bgG, float bgB,
+                      float bgHoverR, float bgHoverG, float bgHoverB,
+                      float borderR, float borderG, float borderB,
+                      float borderHoverR, float borderHoverG, float borderHoverB) {
             this(x,y,w,h,t,a,fontSize,tr,tg,tb);
             setBgColor(bgR, bgG, bgB);
             setBgHoverColor(bgHoverR, bgHoverG, bgHoverB);
@@ -363,14 +445,13 @@ public abstract class BaseGuiWindow {
         @Override
         public void render(long win, boolean hovered) {
             if (!visible) return;
-            // 背景
             if (hovered) GL11.glColor4f(bgHoverR, bgHoverG, bgHoverB, bgAlpha);
             else GL11.glColor4f(bgR, bgG, bgB, bgAlpha);
             GL11.glBegin(GL11.GL_QUADS);
             GL11.glVertex2i(x, y); GL11.glVertex2i(x+width, y);
             GL11.glVertex2i(x+width, y+height); GL11.glVertex2i(x, y+height);
             GL11.glEnd();
-            // 边框
+
             if (hovered) GL11.glColor4f(borderHoverR, borderHoverG, borderHoverB, borderAlpha);
             else GL11.glColor4f(borderR, borderG, borderB, borderAlpha);
             GL11.glLineWidth(1.5f);
@@ -378,23 +459,23 @@ public abstract class BaseGuiWindow {
             GL11.glVertex2i(x, y); GL11.glVertex2i(x+width, y);
             GL11.glVertex2i(x+width, y+height); GL11.glVertex2i(x, y+height);
             GL11.glEnd();
-            // 文字（自动截断）
-            int maxTextWidth = width - 2; // 左右内边距各1px
+
+            int maxTextWidth = width - 2;
             String displayText = text;
-            if (FontRenderer.calculateTextWidth(text, fontSize) > maxTextWidth)
+            if (fontRenderer.calculateTextWidth(text, fontSize) > maxTextWidth)
                 displayText = truncateText(text, maxTextWidth, fontSize);
-            FontRenderer.drawText(win, displayText, x + width/2f, y + height/2f, fontSize, textR, textG, textB);
+            fontRenderer.drawText(win, displayText, x + width/2f, y + height/2f, fontSize, textR, textG, textB);
         }
 
         private String truncateText(String orig, int maxW, int fs) {
             if (orig.isEmpty()) return orig;
-            String ellipsis = ".";
-            int ellipsisW = FontRenderer.calculateTextWidth(ellipsis, fs);
+            String ellipsis = "...";
+            int ellipsisW = fontRenderer.calculateTextWidth(ellipsis, fs);
             int available = maxW - ellipsisW;
             if (available <= 0) return ellipsis;
             for (int i = orig.length(); i > 0; i--) {
                 String sub = orig.substring(0, i);
-                if (FontRenderer.calculateTextWidth(sub, fs) <= available) return sub + ellipsis;
+                if (fontRenderer.calculateTextWidth(sub, fs) <= available) return sub + ellipsis;
             }
             return ellipsis;
         }
@@ -407,7 +488,6 @@ public abstract class BaseGuiWindow {
         }
         @Override public void onClick() { if (action != null) action.run(); }
 
-        // ---------- 样式设置器 ----------
         public void setFontSize(int size) { fontSize = size; }
         public void setTextColor(float r, float g, float b) { textR = r; textG = g; textB = b; }
         public void setBgColor(float r, float g, float b) { bgR = r; bgG = g; bgB = b; }
@@ -418,7 +498,7 @@ public abstract class BaseGuiWindow {
         public void setBorderAlpha(float a) { borderAlpha = a; }
     }
 
-    // ==================== 增强版文本框（保持原样）====================
+    // ==================== 增强版文本框 ====================
     public class TextField extends UIComponent implements Clickable {
         private final String placeholder;
         private final StringBuilder text = new StringBuilder();
@@ -428,9 +508,7 @@ public abstract class BaseGuiWindow {
         private float textR = 1f, textG = 1f, textB = 1f;
         private float placeholderR = 0.6f, placeholderG = 0.6f, placeholderB = 0.6f;
 
-        // 背景色
         private float bgR = 0.15f, bgG = 0.15f, bgB = 0.2f, bgAlpha = 0.9f;
-        // 边框色（普通/悬浮/焦点）
         private float borderR = 0.4f, borderG = 0.4f, borderB = 0.6f, borderAlpha = 1f;
         private float borderHoverR = 0.6f, borderHoverG = 0.6f, borderHoverB = 0.8f;
         private float borderFocusR = 0.4f, borderFocusG = 0.8f, borderFocusB = 1.0f;
@@ -440,20 +518,17 @@ public abstract class BaseGuiWindow {
         private long lastBlinkTime = System.currentTimeMillis();
         private boolean cursorVisible = true;
 
-        // ---------- 构造方法重载 ----------
         public TextField(int x, int y, int w, int h, String p) { super(x,y,w,h); placeholder = p; }
         public TextField(int x, int y, int w, int h, String p, int fontSize) { this(x,y,w,h,p); this.fontSize = fontSize; }
         public TextField(int x, int y, int w, int h, String p, int fontSize, float tr, float tg, float tb) { this(x,y,w,h,p,fontSize); setTextColor(tr,tg,tb); }
 
-        // 全参数构造（背景、边框颜色等）
-        public TextField(int x, int y, int w, int h, String p, int fontSize,//x坐标 y坐标 宽度w 高度h 默认显示提示文字 输入文字大小
-                         float tr, float tg, float tb, // 输入文字颜色
-                         float pr, float pg, float pb,// 占位符颜色
-                         float bgR, float bgG, float bgB,// 背景颜色
-                         float borderR, float borderG, float borderB,//普通边框颜色
-                         float borderHoverR, float borderHoverG, float borderHoverB,//悬浮边框颜色
-                         float borderFocusR, float borderFocusG, float borderFocusB)//焦点边框颜色
-        {
+        public TextField(int x, int y, int w, int h, String p, int fontSize,
+                         float tr, float tg, float tb,
+                         float pr, float pg, float pb,
+                         float bgR, float bgG, float bgB,
+                         float borderR, float borderG, float borderB,
+                         float borderHoverR, float borderHoverG, float borderHoverB,
+                         float borderFocusR, float borderFocusG, float borderFocusB) {
             this(x,y,w,h,p,fontSize,tr,tg,tb);
             setPlaceholderColor(pr, pg, pb);
             setBgColor(bgR, bgG, bgB);
@@ -465,13 +540,12 @@ public abstract class BaseGuiWindow {
         @Override
         public void render(long win, boolean hovered) {
             if (!visible) return;
-            // 背景
             GL11.glColor4f(bgR, bgG, bgB, bgAlpha);
             GL11.glBegin(GL11.GL_QUADS);
             GL11.glVertex2i(x, y); GL11.glVertex2i(x+width, y);
             GL11.glVertex2i(x+width, y+height); GL11.glVertex2i(x, y+height);
             GL11.glEnd();
-            // 边框
+
             if (focusedComponent == this) GL11.glColor4f(borderFocusR, borderFocusG, borderFocusB, borderAlpha);
             else if (hovered) GL11.glColor4f(borderHoverR, borderHoverG, borderHoverB, borderAlpha);
             else GL11.glColor4f(borderR, borderG, borderB, borderAlpha);
@@ -489,8 +563,8 @@ public abstract class BaseGuiWindow {
                 int selStart = getSelectionBegin(), selEnd = getSelectionEnd();
                 String beforeSel = fullText.substring(0, selStart);
                 String selText = fullText.substring(selStart, selEnd);
-                float beforeW = FontRenderer.calculateTextWidth(beforeSel, fontSize);
-                float selW = FontRenderer.calculateTextWidth(selText, fontSize);
+                float beforeW = fontRenderer.calculateTextWidth(beforeSel, fontSize);
+                float selW = fontRenderer.calculateTextWidth(selText, fontSize);
                 GL11.glColor4f(0.2f, 0.4f, 0.9f, 0.4f);
                 GL11.glBegin(GL11.GL_QUADS);
                 GL11.glVertex2i(tx + (int) beforeW, y+5);
@@ -501,14 +575,14 @@ public abstract class BaseGuiWindow {
             }
 
             if (fullText.isEmpty()) {
-                FontRenderer.drawLeftAlignedText(win, display, tx, ty, fontSize, placeholderR, placeholderG, placeholderB);
+                fontRenderer.drawLeftAlignedText(win, display, tx, ty, fontSize, placeholderR, placeholderG, placeholderB);
             } else {
-                FontRenderer.drawLeftAlignedText(win, display, tx, ty, fontSize, textR, textG, textB);
+                fontRenderer.drawLeftAlignedText(win, display, tx, ty, fontSize, textR, textG, textB);
             }
 
             if (focusedComponent == this && cursorVisible) {
                 String beforeCursor = fullText.substring(0, Math.min(cursorPosition, fullText.length()));
-                float cursorX = tx + FontRenderer.calculateTextWidth(beforeCursor, fontSize);
+                float cursorX = tx + fontRenderer.calculateTextWidth(beforeCursor, fontSize);
                 GL11.glColor3f(1,1,1);
                 GL11.glBegin(GL11.GL_QUADS);
                 GL11.glVertex2i((int)cursorX, y+10);
@@ -519,7 +593,6 @@ public abstract class BaseGuiWindow {
             }
         }
 
-        // ---------- 原有功能（光标、选择、剪贴板等）全部保留 ----------
         public void updateBlink() { long now = System.currentTimeMillis(); if (now - lastBlinkTime > 500) { cursorVisible = !cursorVisible; lastBlinkTime = now; } }
         private void resetBlink() { cursorVisible = true; lastBlinkTime = System.currentTimeMillis(); }
         public void addChar(char c) { if (hasSelection()) deleteSelection(); text.insert(cursorPosition, c); cursorPosition++; selectionStart = -1; resetBlink(); }
@@ -532,7 +605,7 @@ public abstract class BaseGuiWindow {
         public void moveCursorRight(boolean shift) { if (cursorPosition < text.length()) { if (!shift) { cursorPosition++; selectionStart = -1; } else { if (selectionStart == -1) selectionStart = cursorPosition; cursorPosition++; } } resetBlink(); }
         public void setCursorPosition(int pos) { int newPos = Math.max(0, Math.min(pos, text.length())); if (isDragging) { cursorPosition = newPos; } else { cursorPosition = newPos; selectionStart = -1; } resetBlink(); }
         public void setSelectionStart(int pos) { selectionStart = Math.max(0, Math.min(pos, text.length())); }
-        public int getCharIndexAtPosition(float mx) { float localX = mx - this.x; float textStartX = 15; if (localX <= textStartX) return 0; String cur = text.toString(); float currentX = 0; for (int i = 0; i < cur.length(); i++) { char c = cur.charAt(i); float cw = FontRenderer.calculateTextWidth(String.valueOf(c), fontSize); if (localX - textStartX <= currentX + cw/2) return i; currentX += cw; } return cur.length(); }
+        public int getCharIndexAtPosition(float mx) { float localX = mx - this.x; float textStartX = 15; if (localX <= textStartX) return 0; String cur = text.toString(); float currentX = 0; for (int i = 0; i < cur.length(); i++) { char c = cur.charAt(i); float cw = fontRenderer.calculateTextWidth(String.valueOf(c), fontSize); if (localX - textStartX <= currentX + cw/2) return i; currentX += cw; } return cur.length(); }
         public boolean hasSelection() { return selectionStart != -1 && selectionStart != cursorPosition; }
         public int getSelectionBegin() { return Math.min(selectionStart, cursorPosition); }
         public int getSelectionEnd() { return Math.max(selectionStart, cursorPosition); }
@@ -574,7 +647,6 @@ public abstract class BaseGuiWindow {
         @Override public boolean handleCharTyped(int code, long win) { if (focusedComponent == this && code >= 32) { addChar((char)code); return true; } return false; }
         @Override public void onClick() {}
 
-        // ---------- 样式设置器 ----------
         public void setFontSize(int size) { fontSize = size; }
         public void setTextColor(float r, float g, float b) { textR = r; textG = g; textB = b; }
         public void setPlaceholderColor(float r, float g, float b) { placeholderR = r; placeholderG = g; placeholderB = b; }
@@ -584,7 +656,6 @@ public abstract class BaseGuiWindow {
         public void setBorderHoverColor(float r, float g, float b) { borderHoverR = r; borderHoverG = g; borderHoverB = b; }
         public void setBorderFocusColor(float r, float g, float b) { borderFocusR = r; borderFocusG = g; borderFocusB = b; }
         public void setBorderAlpha(float a) { borderAlpha = a; }
-
         public void setFocusListener(Consumer<Boolean> l) { focusListener = l; }
         public void setEnterListener(Consumer<String> l) { enterListener = l; }
         public void loseFocus() { if (focusListener != null) focusListener.accept(false); isDragging = false; }
@@ -595,46 +666,41 @@ public abstract class BaseGuiWindow {
         public int getFontSize() { return fontSize; }
     }
 
-    // ==================== 滑块（Slider）- 点击全组件区域跳转 ====================
+    // ==================== 滑块（Slider）====================
     public class Slider extends UIComponent {
         private float value = 0.5f;
         private boolean dragging = false;
+        private float dragOffsetX = 0; // 记录鼠标相对于滑块中心的偏移
         private Consumer<Float> changeListener;
 
-        // ---------- 尺寸策略 ----------
         private Integer fixedTrackHeight = null;
         private Integer fixedThumbWidth = null;
         private Integer fixedThumbHeight = null;
-        private float trackHeightPercent = 0.8f;      // ★ 默认轨道高度 = 组件高度 * 80%
-        private float thumbHeightPercent = 1.0f;       // ★ 默认滑块高度 = 组件高度 * 100%
-        private float thumbWidthPercent = 0.8f;        // 默认滑块宽度 = 组件高度 * 80%
+        private float trackHeightPercent = 0.8f;
+        private float thumbHeightPercent = 1.0f;
+        private float thumbWidthPercent = 0.8f;
 
-        // ---------- 颜色 ----------
         private float trackR = 0.3f, trackG = 0.3f, trackB = 0.4f, trackAlpha = 0.8f;
         private float fillR = 0.2f, fillG = 0.6f, fillB = 1.0f, fillAlpha = 0.9f;
         private float thumbR = 0.9f, thumbG = 0.9f, thumbB = 0.9f, thumbAlpha = 1.0f;
         private float thumbHoverR = 1.0f, thumbHoverG = 1.0f, thumbHoverB = 1.0f, thumbHoverAlpha = 1.0f;
 
-        // ---------- 数值显示 ----------
         private boolean showValue = true;
         private int valueFontSize = 16;
         private float valueR = 1f, valueG = 1f, valueB = 1f;
         private int valueOffsetX = 10;
 
-        // ---------- 构造方法重载 ----------
         public Slider(int x, int y, int width, int height) { super(x,y,width,height); }
         public Slider(int x, int y, int width, int height, float initialValue) { this(x,y,width,height); setValue(initialValue); }
         public Slider(int x, int y, int width, int height, float initialValue, Consumer<Float> listener) { this(x,y,width,height,initialValue); this.changeListener = listener; }
 
-        // 全参数构造（颜色、尺寸、显示选项）
-        public Slider(int x, int y, int width, int height, float initialValue, Consumer<Float> listener,//x坐标 y坐标 宽度 高度 初始值百分比0-1 监听器
-                      float trackR, float trackG, float trackB, //轨道颜色
-                      float fillR, float fillG, float fillB,//填充颜色
-                      float thumbR, float thumbG, float thumbB, //滑块颜色
-                      float thumbHoverR, float thumbHoverG, float thumbHoverB,//滑块悬浮颜色
-                      Integer trackHeight, Integer thumbWidth, Integer thumbHeight,//固定轨道高度像素 固定滑块宽度像素 固定滑块高度像素 传入null按百分比生成
-                      boolean showValue, int valFontSize, float valR, float valG, float valB) //是否显示数值 数值字体大小 数值颜色
-        {
+        public Slider(int x, int y, int width, int height, float initialValue, Consumer<Float> listener,
+                      float trackR, float trackG, float trackB,
+                      float fillR, float fillG, float fillB,
+                      float thumbR, float thumbG, float thumbB,
+                      float thumbHoverR, float thumbHoverG, float thumbHoverB,
+                      Integer trackHeight, Integer thumbWidth, Integer thumbHeight,
+                      boolean showValue, int valFontSize, float valR, float valG, float valB) {
             this(x,y,width,height,initialValue,listener);
             setTrackColor(trackR, trackG, trackB);
             setFillColor(fillR, fillG, fillB);
@@ -648,7 +714,6 @@ public abstract class BaseGuiWindow {
             setValueColor(valR, valG, valB);
         }
 
-        // ---------- 当前有效尺寸（根据固定值或百分比计算）----------
         private int getCurrentTrackHeight() {
             if (fixedTrackHeight != null) return fixedTrackHeight;
             return Math.max(2, (int)(height * trackHeightPercent));
@@ -672,7 +737,6 @@ public abstract class BaseGuiWindow {
             int thumbW = getCurrentThumbWidth();
             int thumbH = getCurrentThumbHeight();
 
-            // 轨道背景
             GL11.glColor4f(trackR, trackG, trackB, trackAlpha);
             GL11.glBegin(GL11.GL_QUADS);
             GL11.glVertex2i(x, trackY);
@@ -681,7 +745,6 @@ public abstract class BaseGuiWindow {
             GL11.glVertex2i(x, trackY + getCurrentTrackHeight());
             GL11.glEnd();
 
-            // 已填充部分（从左侧到滑块中心）
             GL11.glColor4f(fillR, fillG, fillB, fillAlpha);
             GL11.glBegin(GL11.GL_QUADS);
             GL11.glVertex2i(x, trackY);
@@ -690,7 +753,6 @@ public abstract class BaseGuiWindow {
             GL11.glVertex2i(x, trackY + getCurrentTrackHeight());
             GL11.glEnd();
 
-            // 滑块
             if (dragging || isHoveredOnThumb(lastMouseX, lastMouseY)) {
                 GL11.glColor4f(thumbHoverR, thumbHoverG, thumbHoverB, thumbHoverAlpha);
             } else {
@@ -703,16 +765,14 @@ public abstract class BaseGuiWindow {
             GL11.glVertex2i(thumbX - thumbW/2, thumbY + thumbH);
             GL11.glEnd();
 
-            // 数值显示
             if (showValue) {
                 String valText = String.format("%.0f%%", value * 100);
                 int textX = x + width + valueOffsetX;
                 int textY = y + height / 2;
-                FontRenderer.drawLeftAlignedText(win, valText, textX, textY, valueFontSize, valueR, valueG, valueB);
+                fontRenderer.drawLeftAlignedText(win, valText, textX, textY, valueFontSize, valueR, valueG, valueB);
             }
         }
 
-        // 滑块中心 X 坐标（基于当前滑块宽度）
         private int getThumbX() {
             int thumbW = getCurrentThumbWidth();
             int minX = x + thumbW / 2;
@@ -720,7 +780,6 @@ public abstract class BaseGuiWindow {
             return minX + (int)((maxX - minX) * value);
         }
 
-        // 鼠标是否在滑块上（使用当前滑块尺寸）
         private boolean isHoveredOnThumb(float mx, float my) {
             int thumbX = getThumbX();
             int thumbW = getCurrentThumbWidth();
@@ -729,7 +788,6 @@ public abstract class BaseGuiWindow {
             return mx >= thumbX - thumbW/2 && mx <= thumbX + thumbW/2 && my >= thumbY && my <= thumbY + thumbH;
         }
 
-        // 根据鼠标 X 计算值（考虑滑块宽度边界）
         private float getValueFromMouseX(float mx) {
             int thumbW = getCurrentThumbWidth();
             int minX = x + thumbW / 2;
@@ -744,13 +802,11 @@ public abstract class BaseGuiWindow {
             if (!visible) return false;
             if (btn == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
                 if (act == GLFW.GLFW_PRESS) {
-                    // 优先判断滑块拖拽
                     if (isHoveredOnThumb(mx, my)) {
                         dragging = true;
+                        dragOffsetX = mx - getThumbX(); // 记录鼠标与滑块中心的偏移
                         return true;
-                    }
-                    // ★★★ 整个组件区域点击均可跳转 ★★★
-                    else if (isHovered(mx, my)) {
+                    } else if (isHovered(mx, my)) {
                         float newVal = getValueFromMouseX(mx);
                         setValue(newVal);
                         if (changeListener != null) changeListener.accept(value);
@@ -767,7 +823,7 @@ public abstract class BaseGuiWindow {
         public boolean handleMouseMove(float mx, float my, long win) {
             if (!visible) return false;
             if (dragging) {
-                float newVal = getValueFromMouseX(mx);
+                float newVal = getValueFromMouseX(mx - dragOffsetX); // 应用偏移
                 setValue(newVal);
                 if (changeListener != null) changeListener.accept(value);
                 return true;
@@ -775,7 +831,6 @@ public abstract class BaseGuiWindow {
             return false;
         }
 
-        // ---------- 样式设置器 ----------
         public void setValue(float val) { this.value = Math.max(0, Math.min(1, val)); }
         public float getValue() { return value; }
         public void setChangeListener(Consumer<Float> l) { changeListener = l; }
@@ -802,23 +857,23 @@ public abstract class BaseGuiWindow {
         public void setValueOffsetX(int off) { valueOffsetX = off; }
     }
 
-    // ==================== 滚动容器（带背景/边框颜色自定义）====================
+    // ==================== 滚动容器 ====================
     public class ScrollContainer extends UIComponent {
         private final List<UIComponent> children = new CopyOnWriteArrayList<>();
         private final AtomicInteger scrollOffset = new AtomicInteger(0);
         private volatile int totalContentHeight = 0;
         private volatile boolean draggingScrollbar = false;
+        private float dragStartY;      // 记录开始拖拽时鼠标相对于滚动条滑块顶部的偏移
+        private int dragStartOffset;   // 记录开始拖拽时的滚动偏移
+        private int childSpacing = 0;  // 子组件之间的额外间距，默认为0
 
-        // 样式字段
         private float bgR = 0.18f, bgG = 0.18f, bgB = 0.25f, bgAlpha = 0.9f;
         private float borderR = 0.5f, borderG = 0.5f, borderB = 0.7f, borderAlpha = 1f;
 
         public ScrollContainer(int x, int y, int w, int h) { super(x,y,w,h); }
-        // 重载：指定背景色、边框色
-        public ScrollContainer(int x, int y, int w, int h, //x坐标 y坐标 宽度 高度
-                               float bgR, float bgG, float bgB, //背景色
-                               float borderR, float borderG, float borderB) //边框色
-        {
+        public ScrollContainer(int x, int y, int w, int h,
+                               float bgR, float bgG, float bgB,
+                               float borderR, float borderG, float borderB) {
             this(x,y,w,h);
             setBgColor(bgR, bgG, bgB);
             setBorderColor(borderR, borderG, borderB);
@@ -827,13 +882,15 @@ public abstract class BaseGuiWindow {
         @Override
         public void render(long win, boolean hovered) {
             if (!visible) return;
-            // 背景
+            // 每次渲染前重新计算内容总高度，以应对子组件大小变化
+            updateTotalContentHeight();
+
             GL11.glColor4f(bgR, bgG, bgB, bgAlpha);
             GL11.glBegin(GL11.GL_QUADS);
             GL11.glVertex2i(x, y); GL11.glVertex2i(x+width, y);
             GL11.glVertex2i(x+width, y+height); GL11.glVertex2i(x, y+height);
             GL11.glEnd();
-            // 边框
+
             GL11.glColor4f(borderR, borderG, borderB, borderAlpha);
             GL11.glLineWidth(1.5f);
             GL11.glBegin(GL11.GL_LINE_LOOP);
@@ -841,7 +898,6 @@ public abstract class BaseGuiWindow {
             GL11.glVertex2i(x+width, y+height); GL11.glVertex2i(x, y+height);
             GL11.glEnd();
 
-            // 裁剪区域
             GL11.glPushMatrix();
             GL11.glTranslatef(x, y - scrollOffset.get(), 0);
             GL11.glEnable(GL11.GL_SCISSOR_TEST);
@@ -880,8 +936,20 @@ public abstract class BaseGuiWindow {
         @Override public boolean handleMouseClick(float mx, float my, int btn, int act, int mods, long win) {
             if (!visible) return false;
             if (btn == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
-                if (act == GLFW.GLFW_PRESS && isOverScrollbar(mx, my)) { draggingScrollbar = true; return true; }
-                else if (act == GLFW.GLFW_RELEASE) { draggingScrollbar = false; }
+                if (act == GLFW.GLFW_PRESS && isOverScrollbar(mx, my)) {
+                    draggingScrollbar = true;
+                    // 记录偏移：鼠标相对于滚动条滑块顶部的距离
+                    int sw = 8;
+                    int sx = x + width - sw - 6;
+                    float ratio = (totalContentHeight - height == 0) ? 0 : (float) scrollOffset.get() / (totalContentHeight - height);
+                    int sh = Math.max(25, (int) ((float) height / totalContentHeight * height));
+                    int sy = y + (int) (ratio * (height - sh));
+                    dragStartY = my - sy; // 鼠标到滑块顶部的距离
+                    dragStartOffset = scrollOffset.get();
+                    return true;
+                } else if (act == GLFW.GLFW_RELEASE) {
+                    draggingScrollbar = false;
+                }
             }
             float localX = mx - x, localY = my - y + scrollOffset.get();
             for (int i = children.size()-1; i>=0; i--) {
@@ -894,7 +962,20 @@ public abstract class BaseGuiWindow {
         }
         @Override public boolean handleMouseMove(float mx, float my, long win) {
             if (!visible) return false;
-            if (draggingScrollbar) { setScrollOffsetFromY(my); return true; }
+            if (draggingScrollbar) {
+                // 根据鼠标位置计算新的滚动偏移
+                int sw = 8;
+                int sx = x + width - sw - 6;
+                int sh = Math.max(25, (int) ((float) height / totalContentHeight * height));
+                int trackH = height - sh;
+                float relY = my - y - dragStartY; // 鼠标相对于滚动条轨道顶部的距离（考虑初始偏移）
+                relY = Math.max(0, Math.min(relY, trackH));
+                float ratio = relY / trackH;
+                int newOffset = (int) (ratio * (totalContentHeight - height));
+                scrollOffset.set(newOffset);
+                clampScrollOffset();
+                return true;
+            }
             float localX = mx - x, localY = my - y + scrollOffset.get();
             for (int i = children.size()-1; i>=0; i--) {
                 UIComponent child = children.get(i);
@@ -931,13 +1012,20 @@ public abstract class BaseGuiWindow {
         public void addChild(UIComponent child) { children.add(child); updateTotalContentHeight(); clampScrollOffset(); }
         public void removeChild(UIComponent child) { children.remove(child); updateTotalContentHeight(); clampScrollOffset(); }
         public void clearChildren() { children.clear(); scrollOffset.set(0); totalContentHeight = 0; }
-        public void updateTotalContentHeight() { int maxY = 0; for (UIComponent ch : children) maxY = Math.max(maxY, ch.getY() + ch.getHeight() + 5); totalContentHeight = maxY; clampScrollOffset(); }
+        public void updateTotalContentHeight() {
+            int maxY = 0;
+            for (UIComponent ch : children) {
+                maxY = Math.max(maxY, ch.getY() + ch.getHeight() + childSpacing);
+            }
+            totalContentHeight = maxY;
+            clampScrollOffset();
+        }
 
         public List<UIComponent> getChildren() { return children; }
         public int getScrollOffset() { return scrollOffset.get(); }
         public void setScrollOffset(int off) { scrollOffset.set(off); clampScrollOffset(); }
+        public void setChildSpacing(int spacing) { this.childSpacing = spacing; updateTotalContentHeight(); }
 
-        // 样式设置
         public void setBgColor(float r, float g, float b) { bgR = r; bgG = g; bgB = b; }
         public void setBgAlpha(float a) { bgAlpha = a; }
         public void setBorderColor(float r, float g, float b) { borderR = r; borderG = g; borderB = b; }
