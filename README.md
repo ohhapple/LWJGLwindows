@@ -57,7 +57,6 @@ minecraft客户端实例自行导入，该示例代码基于CarpetPlus项目
 package com.ohhapple.carpetplus.gui.test;
 
 import com.ohhapple.carpetplus.client.CarpetPLUSClient;
-import com.ohhapple.carpetplus.gui.Font.FontRenderer;
 import com.ohhapple.carpetplus.gui.util.*;
 
 public class ExamplePage {
@@ -76,17 +75,16 @@ public class ExamplePage {
         BaseGuiWindow.setWindowIcon("/assets/carpetplus/icon.png");
 
         GuiWindows.open(mc, "演示窗口", 700, 600, win -> {
-              //可选：页面背景色rgb
+            // 可选：页面背景色rgb
             win.setBackgroundColor(0.1f, 0.1f, 0.15f);
-            // 标题（自定义组件）
+            // 标题（自定义组件）- 使用 win.fontRenderer
             win.addComponent(win.new UIComponent(0, 0, win.windowWidth, 50) {
                 @Override
                 public void render(long handle, boolean hovered) {
-                    FontRenderer.drawText(handle, "演示窗口",
+                    win.fontRenderer.drawText(handle, "演示窗口",
                             win.windowWidth / 2f, 30, 32, 1, 1, 1);
                 }
             });
-
 
             // ---- 音量滑块 ----
             BaseGuiWindow.Slider volumeSlider = win.new Slider(350, 150, 300, 15, 0.7f, value -> {
@@ -94,26 +92,25 @@ public class ExamplePage {
             });
             volumeSlider.setShowValue(true);
             volumeSlider.setValueFontSize(18);
-            volumeSlider.setValueColor(0.8f, 0.9f, 1.0f); // 淡蓝色数值
-            volumeSlider.setFillColor(0.2f, 0.8f, 0.6f);  // 绿色填充
+            volumeSlider.setValueColor(0.8f, 0.9f, 1.0f);
+            volumeSlider.setFillColor(0.2f, 0.8f, 0.6f);
             win.addComponent(volumeSlider);
 
-            // ---- 另一个滑块，不显示数值，自定义颜色 ----
+            // ---- 另一个滑块，不显示数值 ----
             BaseGuiWindow.Slider effectSlider = win.new Slider(350, 170, 300, 15, 0.3f);
             effectSlider.setShowValue(false);
-            effectSlider.setFillColor(0.9f, 0.6f, 0.2f); // 橙色
+            effectSlider.setFillColor(0.9f, 0.6f, 0.2f);
             effectSlider.setChangeListener(val -> {
-                // 执行特效强度调整
                 System.out.println("特效强度: " + val);
             });
             win.addComponent(effectSlider);
 
             // ----- 文本框：指定字体大小 22，文字颜色浅蓝色 -----
             BaseGuiWindow.TextField searchField = win.new TextField(50, 90, 600, 45, "搜索...", 22, 0.6f, 0.8f, 1.0f);
-            searchField.setPlaceholderColor(0.5f, 0.5f, 0.5f); // 占位符灰色
+            searchField.setPlaceholderColor(0.5f, 0.5f, 0.5f);
             searchField.setEnterListener(text -> System.out.println("回车搜索：" + text));
             win.addComponent(searchField);
-            // 可选：设置初始焦点
+            // 可选：设置焦点
             win.focusedComponent = searchField;
 
             // ----- 按钮1：默认白色字体，自动截断长文本 -----
@@ -127,7 +124,7 @@ public class ExamplePage {
                     () -> System.out.println("彩色按钮点击"), 28, 1.0f, 0.6f, 0.2f);
             win.addComponent(colorBtn);
 
-            // 滚动容器（无文字颜色需求，仅使用默认构造参数）
+            // 滚动容器
             BaseGuiWindow.ScrollContainer resultList = win.new ScrollContainer(50, 210, 600, 300);
             for (int i = 0; i < 50; i++) {
                 int idx = i;
