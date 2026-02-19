@@ -3,6 +3,8 @@
 
 # 文档主页：https://ohhapple.github.io/
 
+建议使用最新版本，可通过tag时间查看
+
 导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'           include 'com.github.ohhapple:LWJGLwindows:版本号'
 
 include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
