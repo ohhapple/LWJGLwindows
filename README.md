@@ -4,7 +4,9 @@
 # 文档主页：https://ohhapple.github.io
 # 建议使用最新版本，可通过tag时间查看，一个tag代表一个版本
 
-导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'           include 'com.github.ohhapple:LWJGLwindows:版本号'
+导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'
+
+打包进jar：include 'com.github.ohhapple:LWJGLwindows:版本号'
 
 include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
 # 大致流程图
