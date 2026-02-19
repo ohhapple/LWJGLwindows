@@ -1,8 +1,8 @@
 # LWJGLwindows
 这是一个用于在Minecraft中创建独立窗口的LWJGL窗口封装库旨在解决因Minecraft不同版本间原生GUI类如Screen的差异而需频繁修改自定义GUI代码的问题。
 
-# 文档主页：https://ohhapple.github.io/
-# 建议使用最新版本，可通过tag时间查看
+# 文档主页：https://ohhapple.github.io
+# 建议使用最新版本，可通过tag时间查看，一个tag代表一个版本
 
 导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'           include 'com.github.ohhapple:LWJGLwindows:版本号'
 
