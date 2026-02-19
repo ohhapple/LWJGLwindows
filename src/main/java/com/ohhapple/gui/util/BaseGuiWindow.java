@@ -1,5 +1,20 @@
 /*
  * Copyright (C) 2026 ohhapple
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+ *
+ * SPDX-License-Identifier: LGPL-3.0
  */
 
 package com.ohhapple.gui.util;
@@ -9,8 +24,10 @@ import org.lwjgl.glfw.*;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 
 import java.nio.IntBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -31,16 +48,18 @@ public abstract class BaseGuiWindow {
     private final AtomicBoolean isCreated = new AtomicBoolean(false);
     private final AtomicLong windowHandle = new AtomicLong(0L);
     private Thread renderThread;
+    private static final AtomicBoolean handlingError = new AtomicBoolean(false);
+
+    private volatile Double waitTimeoutSeconds = 0.016; // 默认 16ms 超时（≈60 FPS）
+    private volatile boolean vsyncEnabled = true;       // 默认开启垂直同步
 
     // -------------------- 主窗口句柄 --------------------
     private final AtomicLong mcWindowHandle = new AtomicLong(0L);
-    private final AtomicBoolean handleFetched = new AtomicBoolean(false);
-    private final Object handleLock = new Object();
 
     // -------------------- UI 组件管理 --------------------
     protected final List<UIComponent> uiComponents = new CopyOnWriteArrayList<>();
     protected volatile UIComponent hoveredComponent;
-    public volatile UIComponent focusedComponent;  // 外部可直接读写
+    public volatile UIComponent focusedComponent;
 
     protected float lastMouseX, lastMouseY;
 
@@ -52,7 +71,7 @@ public abstract class BaseGuiWindow {
     private float bgR = 0.1f, bgG = 0.1f, bgB = 0.15f;
     public void setBackgroundColor(float r, float g, float b) { bgR = r; bgG = g; bgB = b; }
 
-    // -------------------- 字体渲染器（每个窗口独立，public 以便外部访问） --------------------
+    // -------------------- 字体渲染器（每个窗口独立） --------------------
     public FontRenderer fontRenderer;
 
     // -------------------- GLFW 回调对象（必须持有） --------------------
@@ -63,10 +82,18 @@ public abstract class BaseGuiWindow {
     private GLFWKeyCallback keyCallback;
     private GLFWCharCallback charCallback;
     private GLFWWindowSizeCallback windowSizeCallback;
-    // 自定义错误回调，避免触发 Minecraft 的线程检查
-    private GLFWErrorCallback customErrorCallback;
 
-    // -------------------- OpenGL 能力创建标志（每个线程只创建一次） --------------------
+    // -------------------- 主窗口关闭回调相关 --------------------
+    private static GLFWWindowCloseCallback originalMainWindowCloseCallback;
+    private static GLFWWindowCloseCallback ourMainWindowCloseCallback;
+    private static boolean mainWindowCloseCallbackSet = false;
+
+    // -------------------- 全局错误回调相关 --------------------
+    private static int windowCount = 0;
+    private static GLFWErrorCallback originalErrorCallback;
+    private static GLFWErrorCallback globalErrorCallback;
+
+    // -------------------- OpenGL 能力创建标志 --------------------
     private boolean glCapabilitiesCreated = false;
 
     // -------------------- 构造方法 --------------------
@@ -76,11 +103,10 @@ public abstract class BaseGuiWindow {
         this.windowWidth = width;
         this.windowHeight = height;
 
+        // 在主线程获取当前窗口句柄（Minecraft 主窗口）
         mc.execute(() -> {
             long handle = GLFW.glfwGetCurrentContext();
             mcWindowHandle.set(handle);
-            handleFetched.set(true);
-            synchronized (handleLock) { handleLock.notifyAll(); }
         });
     }
 
@@ -107,16 +133,34 @@ public abstract class BaseGuiWindow {
     public final void removeComponent(UIComponent comp) { uiComponents.remove(comp); }
     public final void clearComponents() { uiComponents.clear(); }
 
+    // -------------------- 窗口等待机制与帧率设置--------------------
+
+    // 通过目标帧率设置超时时间（例如 targetFPS = 60 则超时 1/60 ≈ 0.0167 秒）传入 null 表示使用 glfwWaitEvents() 无限等待
+    public void setTargetFPS(int fps) {
+        if (fps <= 0) {
+            setWaitTimeout(null); // 无限等待
+        } else {
+            setWaitTimeout(1.0 / fps);
+        }
+    }
+
+    // 启用/禁用垂直同步
+    public void setVsyncEnabled(boolean enabled) {
+        this.vsyncEnabled = enabled;
+    }
+
+    // 设置等待超时（秒）。传入 null 表示使用 glfwWaitEvents() 无限等待
+    private void setWaitTimeout(Double timeoutSeconds) {
+        this.waitTimeoutSeconds = timeoutSeconds;
+    }
+
     // -------------------- 窗口创建（内部，在主线程执行）--------------------
     private void createWindowInRenderThread() {
-        if (!handleFetched.get()) {
-            synchronized (handleLock) {
-                try { handleLock.wait(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            }
-        }
-
         long mainWindow = mcWindowHandle.get();
-        if (mainWindow == 0) { isOpen.set(false); return; }
+        if (mainWindow == 0) {
+            isOpen.set(false);
+            return;
+        }
 
         GLFW.glfwDefaultWindowHints();
         GLFW.glfwWindowHint(GLFW.GLFW_VISIBLE, GLFW.GLFW_FALSE);
@@ -127,19 +171,24 @@ public abstract class BaseGuiWindow {
         GLFW.glfwWindowHint(GLFW.GLFW_ALPHA_BITS, 8);
         GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, 4);
 
-        // Wayland 平台特殊处理：必须在窗口创建前设置 APP_ID
+        // Wayland 平台特殊处理
         if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
             GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "LWJGLwindows");
         }
 
-        long newWindow = GLFW.glfwCreateWindow(windowWidth, windowHeight, title, 0, mainWindow);
-        if (newWindow == 0) { isOpen.set(false); return; }
+        // 创建独立上下文窗口（不共享主窗口上下文）
+        long newWindow = GLFW.glfwCreateWindow(windowWidth, windowHeight, title, 0, 0);
+        if (newWindow == 0) {
+            isOpen.set(false);
+            return;
+        }
 
-        // 设置窗口图标（如果已指定）
+        // 设置窗口图标
         if (windowIconPath != null && !windowIconPath.isEmpty()) {
             setWindowIconInternal(newWindow, windowIconPath);
         }
 
+        // 居中显示
         try (MemoryStack stack = MemoryStack.stackPush()) {
             IntBuffer mX = stack.mallocInt(1), mY = stack.mallocInt(1);
             IntBuffer mW = stack.mallocInt(1), mH = stack.mallocInt(1);
@@ -156,8 +205,41 @@ public abstract class BaseGuiWindow {
         isCreated.set(true);
         GLFW.glfwShowWindow(newWindow);
 
-        // 注意：此处不再设置 OpenGL 上下文，全部留给渲染线程处理
-        // 只初始化 UI 组件（组件初始化不依赖 OpenGL）
+        // 设置全局错误回调（仅在第一个窗口创建成功时）
+        synchronized (BaseGuiWindow.class) {
+            windowCount++;
+            if (windowCount == 1) {
+                globalErrorCallback = GLFWErrorCallback.create((error, description) -> {
+                    if (handlingError.compareAndSet(false, true)) {
+                        try {
+                            String descStr = description != 0 ? MemoryUtil.memUTF8(description) : "null";
+                            System.err.println("[GUI GLFW Error] " + error + ": " + descStr);
+                            new ArrayList<>(GuiWindows.getWindows().keySet()).forEach(BaseGuiWindow::close);
+                        } finally {
+                            handlingError.set(false);
+                        }
+                    }
+                });
+                originalErrorCallback = GLFW.glfwSetErrorCallback(globalErrorCallback);
+            }
+        }
+
+        // 设置主窗口关闭回调（仅第一次）
+        synchronized (BaseGuiWindow.class) {
+            if (!mainWindowCloseCallbackSet) {
+                originalMainWindowCloseCallback = GLFW.glfwSetWindowCloseCallback(mainWindow, null);
+                ourMainWindowCloseCallback = GLFWWindowCloseCallback.create((window) -> {
+                    if (originalMainWindowCloseCallback != null) {
+                        originalMainWindowCloseCallback.invoke(window);
+                    }
+                    GuiWindows.closeAllwindows();
+                });
+                GLFW.glfwSetWindowCloseCallback(mainWindow, ourMainWindowCloseCallback);
+                mainWindowCloseCallbackSet = true;
+            }
+        }
+
+        // 初始化 UI 组件
         initUIComponents();
         relayoutComponents(windowWidth, windowHeight);
         startRenderLoop();
@@ -165,9 +247,9 @@ public abstract class BaseGuiWindow {
 
     private void setWindowIconInternal(long windowHandle, String iconPath) {
         if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_COCOA) {
-            System.out.println("[GUI] macOS 窗口不支持自定义图标，已跳过"); return;
+            System.out.println("[GUI] macOS The window does not support custom icons, skipped.");
+            return;
         }
-        // Wayland 平台已在创建窗口前设置 APP_ID，无需再次设置图标
         if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
             return;
         }
@@ -177,58 +259,49 @@ public abstract class BaseGuiWindow {
             GLFWImage.Buffer imageBuffer = GLFWImage.malloc(1);
             imageBuffer.put(0, glfwImage);
             GLFW.glfwSetWindowIcon(windowHandle, imageBuffer);
-            glfwImage.free(); imageBuffer.free();
+            glfwImage.free();
+            imageBuffer.free();
         } catch (Exception e) {
-            System.err.println("[GUI] 设置窗口图标失败: " + e.getMessage());
+            System.err.println("[GUI] Failed to set window icon: " + e.getMessage());
         }
     }
 
     private void startRenderLoop() {
-        renderThread = new Thread(this::renderLoop, "GUI-" + title);
+        renderThread = new Thread(this::renderLoop, "GUI-"+windowCount+"-" + title);
         renderThread.setDaemon(true);
         renderThread.start();
     }
 
-    // 优化后的渲染循环：使用 glfwWaitEventsTimeout 替代 glfwPollEvents
+    // 渲染循环
     private void renderLoop() {
         long handle = windowHandle.get();
         if (handle == 0) return;
 
-        // 设置当前上下文（必须在渲染线程中进行）
         GLFW.glfwMakeContextCurrent(handle);
 
-        // 初始化 OpenGL 能力（只做一次）
         if (!glCapabilitiesCreated) {
             GL.createCapabilities();
             glCapabilitiesCreated = true;
         }
 
-        // 初始化字体渲染器（需要 OpenGL 上下文）
         if (fontRenderer == null) {
             fontRenderer = new FontRenderer();
             fontRenderer.init();
         }
 
-        // 启用垂直同步
-        GLFW.glfwSwapInterval(1);
-
+        GLFW.glfwSwapInterval(vsyncEnabled ? 1 : 0);
         GL11.glEnable(GL11.GL_BLEND);
         GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
         GL11.glDisable(GL11.GL_DEPTH_TEST);
         GL11.glDisable(GL11.GL_CULL_FACE);
         GL11.glClearColor(bgR, bgG, bgB, 1.0f);
 
-        // 设置输入回调（传入当前窗口句柄）
         setupInputCallbacks(handle);
 
-        while (isOpen.get()) {
+        while (isOpen.get() && !Thread.currentThread().isInterrupted()) {
             long currentHandle = windowHandle.get();
-            // 双重检查：句柄为0或窗口应关闭时退出
-            if (currentHandle == 0 || GLFW.glfwWindowShouldClose(currentHandle)) {
-                break;
-            }
+            if (currentHandle == 0 || GLFW.glfwWindowShouldClose(currentHandle)) break;
 
-            // 确保上下文仍然是当前线程的
             if (GLFW.glfwGetCurrentContext() != currentHandle) {
                 GLFW.glfwMakeContextCurrent(currentHandle);
             }
@@ -244,36 +317,36 @@ public abstract class BaseGuiWindow {
             renderAll(currentHandle);
 
             GLFW.glfwSwapBuffers(currentHandle);
-
-            // ★ 优化点：使用 glfwWaitEventsTimeout 替代 glfwPollEvents
-            // 等待事件，最多 16ms。没有事件时线程休眠，大幅降低 CPU 占用
-            GLFW.glfwWaitEventsTimeout(0.016);
+            if (waitTimeoutSeconds == null) {
+                GLFW.glfwWaitEvents();
+            } else {
+                GLFW.glfwWaitEventsTimeout(waitTimeoutSeconds);
+            }
         }
 
-        // 渲染循环结束，清理字体渲染器（仍在渲染线程）
+        // 渲染线程退出，清理字体资源
         if (fontRenderer != null) {
             fontRenderer.cleanup();
             fontRenderer = null;
         }
-
-        // 退出循环，清理状态
-        GL11.glDisable(GL11.GL_BLEND);
-        GL11.glEnable(GL11.GL_DEPTH_TEST);
-        GL11.glEnable(GL11.GL_CULL_FACE);
+        // 释放 OpenGL 上下文
+        GLFW.glfwMakeContextCurrent(0);
     }
 
     private void renderAll(long handle) {
         for (UIComponent comp : uiComponents) {
             if (comp instanceof TextField) ((TextField) comp).updateBlink();
             if (comp instanceof ScrollContainer) {
-                // 更新容器内子组件
                 for (UIComponent child : ((ScrollContainer) comp).getChildren()) {
                     if (child instanceof TextField) ((TextField) child).updateBlink();
                 }
             }
         }
         for (UIComponent comp : uiComponents) {
+            // 保存当前 OpenGL 状态，防止组件之间相互影响
+            GL11.glPushAttrib(GL11.GL_CURRENT_BIT | GL11.GL_ENABLE_BIT | GL11.GL_TEXTURE_BIT | GL11.GL_COLOR_BUFFER_BIT);
             comp.render(handle, comp == hoveredComponent);
+            GL11.glPopAttrib();
         }
     }
 
@@ -281,89 +354,152 @@ public abstract class BaseGuiWindow {
         long handle = windowHandle.get();
         if (handle == 0) return;
 
-        // 1. 通知渲染循环退出
+        // 通知渲染循环退出
         isOpen.set(false);
-        GLFW.glfwSetWindowShouldClose(handle, true);
+        GLFW.glfwPostEmptyEvent();
 
-        // 2. 中断并等待渲染线程结束
-        if (renderThread != null && renderThread.isAlive()) {
+        // 等待渲染线程退出（最多 500ms）
+        if (renderThread != null) {
             renderThread.interrupt();
             try {
-                renderThread.join(2000);
+                renderThread.join(500);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            renderThread = null;
         }
 
-        // 3. 释放 GLFW 回调
-        if (windowCloseCallback != null) { windowCloseCallback.close(); windowCloseCallback = null; }
-        if (cursorPosCallback != null) { cursorPosCallback.close(); cursorPosCallback = null; }
-        if (mouseButtonCallback != null) { mouseButtonCallback.close(); mouseButtonCallback = null; }
-        if (scrollCallback != null) { scrollCallback.close(); scrollCallback = null; }
-        if (keyCallback != null) { keyCallback.close(); keyCallback = null; }
-        if (charCallback != null) { charCallback.close(); charCallback = null; }
-        if (windowSizeCallback != null) { windowSizeCallback.close(); windowSizeCallback = null; }
+        // 字体资源已在渲染线程中清理，此处不再操作 OpenGL
 
-        // 4. 恢复并清理自定义错误回调
-        if (customErrorCallback != null) {
-            // 恢复原来的错误回调（Minecraft的）
-            GLFW.glfwSetErrorCallback(customErrorCallback);
-            // 注意：不要调用 customErrorCallback.close()，因为那是Minecraft的回调
-            customErrorCallback = null;
+        // 释放 GLFW 回调
+        if (windowCloseCallback != null) {
+            GLFW.glfwSetWindowCloseCallback(handle, null);
+            windowCloseCallback.close();
+            windowCloseCallback = null;
+        }
+        if (cursorPosCallback != null) {
+            GLFW.glfwSetCursorPosCallback(handle, null);
+            cursorPosCallback.close();
+            cursorPosCallback = null;
+        }
+        if (mouseButtonCallback != null) {
+            GLFW.glfwSetMouseButtonCallback(handle, null);
+            mouseButtonCallback.close();
+            mouseButtonCallback = null;
+        }
+        if (scrollCallback != null) {
+            GLFW.glfwSetScrollCallback(handle, null);
+            scrollCallback.close();
+            scrollCallback = null;
+        }
+        if (keyCallback != null) {
+            GLFW.glfwSetKeyCallback(handle, null);
+            keyCallback.close();
+            keyCallback = null;
+        }
+        if (charCallback != null) {
+            GLFW.glfwSetCharCallback(handle, null);
+            charCallback.close();
+            charCallback = null;
+        }
+        if (windowSizeCallback != null) {
+            GLFW.glfwSetWindowSizeCallback(handle, null);
+            windowSizeCallback.close();
+            windowSizeCallback = null;
         }
 
-        // 5. 销毁窗口
+        // 销毁窗口
         GLFW.glfwDestroyWindow(handle);
+        GuiWindows.WINDOWS.remove(this);
+
+        // 处理全局错误回调计数
+        GLFW.glfwPollEvents();
+
+        synchronized (BaseGuiWindow.class) {
+            windowCount--;
+            if (windowCount == 0 && globalErrorCallback != null) {
+                GLFW.glfwSetErrorCallback(originalErrorCallback);
+                globalErrorCallback.close();
+                globalErrorCallback = null;
+                originalErrorCallback = null;
+            }
+        }
+
+        // 清空组件
+        uiComponents.clear();
+        hoveredComponent = null;
+        focusedComponent = null;
         windowHandle.set(0L);
         isCreated.set(false);
     }
 
     private void setupInputCallbacks(long handle) {
-        // 保存原始错误回调并设置自定义错误回调，避免GLFW错误触发Minecraft的线程检查
-        customErrorCallback = GLFW.glfwSetErrorCallback((error, description) -> {
-            System.err.println("[GUI GLFW Error] " + error + ": " + description);
-            // 发生错误时自动关闭窗口（避免窗口卡死）
-            // 使用 mc.execute 委托给主线程执行关闭操作，因为错误回调可能在任意线程被调用
-            if (isOpen.get()) {
-                mc.execute(() -> close());
-            }
-        });
+        windowCloseCallback = GLFWWindowCloseCallback.create(w -> close());
+        GLFW.glfwSetWindowCloseCallback(handle, windowCloseCallback);
 
-        windowCloseCallback = GLFW.glfwSetWindowCloseCallback(handle, w -> close());
-        cursorPosCallback = GLFW.glfwSetCursorPosCallback(handle, (w, x, y) -> {
-            lastMouseX = (float) x; lastMouseY = (float) y;
+        cursorPosCallback = GLFWCursorPosCallback.create((w, x, y) -> {
+            lastMouseX = (float) x;
+            lastMouseY = (float) y;
             updateHoveredComponent();
             for (UIComponent comp : uiComponents) {
                 if (comp.handleMouseMove(lastMouseX, lastMouseY, handle)) break;
             }
         });
-        mouseButtonCallback = GLFW.glfwSetMouseButtonCallback(handle, (w, btn, act, mods) -> {
+        GLFW.glfwSetCursorPosCallback(handle, cursorPosCallback);
+
+        mouseButtonCallback = GLFWMouseButtonCallback.create((w, btn, act, mods) -> {
+            boolean handled = false;
             for (UIComponent comp : uiComponents) {
-                if (comp.handleMouseClick(lastMouseX, lastMouseY, btn, act, mods, handle)) return;
+                if (comp.handleMouseClick(lastMouseX, lastMouseY, btn, act, mods, handle)) {
+                    handled = true;
+                    break;
+                }
+            }
+            // 如果没有组件处理点击，且是鼠标左键按下，则清除焦点
+            if (!handled && btn == GLFW.GLFW_MOUSE_BUTTON_LEFT && act == GLFW.GLFW_PRESS) {
+                if (focusedComponent != null) {
+                    if (focusedComponent instanceof TextField) {
+                        ((TextField) focusedComponent).loseFocus();
+                    }
+                    focusedComponent = null;
+                }
             }
         });
-        scrollCallback = GLFW.glfwSetScrollCallback(handle, (w, xOff, yOff) -> {
+        GLFW.glfwSetMouseButtonCallback(handle, mouseButtonCallback);
+
+        scrollCallback = GLFWScrollCallback.create((w, xOff, yOff) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleMouseScroll(lastMouseX, lastMouseY, (float) xOff, (float) yOff, handle)) break;
             }
         });
-        keyCallback = GLFW.glfwSetKeyCallback(handle, (w, key, scancode, act, mods) -> {
+        GLFW.glfwSetScrollCallback(handle, scrollCallback);
+
+        keyCallback = GLFWKeyCallback.create((w, key, scancode, act, mods) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleKeyPress(key, scancode, act, mods, handle)) return;
             }
             if (act == GLFW.GLFW_PRESS || act == GLFW.GLFW_REPEAT) {
-                if (key == GLFW.GLFW_KEY_ESCAPE) { close(); focusedComponent = null; }
+                if (key == GLFW.GLFW_KEY_ESCAPE) {
+                    close();
+                    focusedComponent = null;
+                }
             }
         });
-        charCallback = GLFW.glfwSetCharCallback(handle, (w, codepoint) -> {
+        GLFW.glfwSetKeyCallback(handle, keyCallback);
+
+        charCallback = GLFWCharCallback.create((w, codepoint) -> {
             for (UIComponent comp : uiComponents) {
                 if (comp.handleCharTyped(codepoint, handle)) return;
             }
         });
-        windowSizeCallback = GLFW.glfwSetWindowSizeCallback(handle, (w, width, height) -> {
-            windowWidth = width; windowHeight = height;
+        GLFW.glfwSetCharCallback(handle, charCallback);
+
+        windowSizeCallback = GLFWWindowSizeCallback.create((w, width, height) -> {
+            windowWidth = width;
+            windowHeight = height;
             relayoutComponents(width, height);
         });
+        GLFW.glfwSetWindowSizeCallback(handle, windowSizeCallback);
     }
 
     private void updateHoveredComponent() {
@@ -376,7 +512,8 @@ public abstract class BaseGuiWindow {
                     float localY = lastMouseY - sc.getY() + sc.getScrollOffset();
                     for (UIComponent child : sc.getChildren()) {
                         if (child.isHovered(localX, localY)) {
-                            hoveredComponent = child; break;
+                            hoveredComponent = child;
+                            break;
                         }
                     }
                 }
@@ -386,7 +523,7 @@ public abstract class BaseGuiWindow {
     }
 
     // ======================================================================
-    //  UI 组件系统（全部 public，与原风格一致）
+    //  UI 组件系统
     // ======================================================================
     public abstract class UIComponent {
         protected int x, y, width, height;
@@ -409,7 +546,7 @@ public abstract class BaseGuiWindow {
 
     public interface Clickable { void onClick(); }
 
-    // ==================== 增强版按钮 ====================
+    // ==================== 按钮 ====================
     public class Button extends UIComponent implements Clickable {
         private final String text;
         private final Runnable action;
@@ -498,7 +635,7 @@ public abstract class BaseGuiWindow {
         public void setBorderAlpha(float a) { borderAlpha = a; }
     }
 
-    // ==================== 增强版文本框 ====================
+    // ==================== 文本框 ====================
     public class TextField extends UIComponent implements Clickable {
         private final String placeholder;
         private final StringBuilder text = new StringBuilder();
@@ -866,6 +1003,7 @@ public abstract class BaseGuiWindow {
         private float dragStartY;      // 记录开始拖拽时鼠标相对于滚动条滑块顶部的偏移
         private int dragStartOffset;   // 记录开始拖拽时的滚动偏移
         private int childSpacing = 0;  // 子组件之间的额外间距，默认为0
+        private int MouseScrollSensitivity = 50;
 
         private float bgR = 0.18f, bgG = 0.18f, bgB = 0.25f, bgAlpha = 0.9f;
         private float borderR = 0.5f, borderG = 0.5f, borderB = 0.7f, borderAlpha = 1f;
@@ -935,22 +1073,31 @@ public abstract class BaseGuiWindow {
 
         @Override public boolean handleMouseClick(float mx, float my, int btn, int act, int mods, long win) {
             if (!visible) return false;
-            if (btn == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
-                if (act == GLFW.GLFW_PRESS && isOverScrollbar(mx, my)) {
-                    draggingScrollbar = true;
-                    // 记录偏移：鼠标相对于滚动条滑块顶部的距离
-                    int sw = 8;
-                    int sx = x + width - sw - 6;
-                    float ratio = (totalContentHeight - height == 0) ? 0 : (float) scrollOffset.get() / (totalContentHeight - height);
-                    int sh = Math.max(25, (int) ((float) height / totalContentHeight * height));
-                    int sy = y + (int) (ratio * (height - sh));
-                    dragStartY = my - sy; // 鼠标到滑块顶部的距离
-                    dragStartOffset = scrollOffset.get();
-                    return true;
-                } else if (act == GLFW.GLFW_RELEASE) {
-                    draggingScrollbar = false;
+            if (btn == GLFW.GLFW_MOUSE_BUTTON_LEFT && act == GLFW.GLFW_PRESS) {
+                // 检查是否在滚动条区域内（包括轨道和滑块）
+                int sw = 8;
+                int sx = x + width - sw - 6;
+                if (mx >= sx && mx <= sx + sw && my >= y && my <= y + height) {
+                    // 是滚动条区域
+                    if (!isOverScrollbar(mx, my)) {
+                        // 点击在轨道上，直接跳转
+                        setScrollOffsetFromY(my);
+                        return true;
+                    } else {
+                        // 点击在滑块上，原逻辑处理
+                        draggingScrollbar = true;
+                        float ratio = (totalContentHeight - height == 0) ? 0 : (float) scrollOffset.get() / (totalContentHeight - height);
+                        int sh = Math.max(25, (int) ((float) height / totalContentHeight * height));
+                        int sy = y + (int) (ratio * (height - sh));
+                        dragStartY = my - sy; // 鼠标到滑块顶部的距离
+                        dragStartOffset = scrollOffset.get();
+                        return true;
+                    }
                 }
+            } else if (act == GLFW.GLFW_RELEASE) {
+                draggingScrollbar = false;
             }
+
             float localX = mx - x, localY = my - y + scrollOffset.get();
             for (int i = children.size()-1; i>=0; i--) {
                 UIComponent child = children.get(i);
@@ -960,6 +1107,7 @@ public abstract class BaseGuiWindow {
             }
             return false;
         }
+
         @Override public boolean handleMouseMove(float mx, float my, long win) {
             if (!visible) return false;
             if (draggingScrollbar) {
@@ -984,7 +1132,7 @@ public abstract class BaseGuiWindow {
             return false;
         }
         @Override public boolean handleMouseScroll(float mx, float my, float xOff, float yOff, long win) {
-            if (isHovered(mx, my)) { scroll((int)(yOff * -50)); return true; }
+            if (isHovered(mx, my)) { scroll((int)(yOff * -MouseScrollSensitivity)); return true; }
             return false;
         }
 
@@ -1025,6 +1173,7 @@ public abstract class BaseGuiWindow {
         public int getScrollOffset() { return scrollOffset.get(); }
         public void setScrollOffset(int off) { scrollOffset.set(off); clampScrollOffset(); }
         public void setChildSpacing(int spacing) { this.childSpacing = spacing; updateTotalContentHeight(); }
+        public void setMouseScrollSensitivity(int sensitivity) { this.MouseScrollSensitivity = sensitivity; }
 
         public void setBgColor(float r, float g, float b) { bgR = r; bgG = g; bgB = b; }
         public void setBgAlpha(float a) { bgAlpha = a; }

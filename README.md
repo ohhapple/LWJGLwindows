@@ -1,4 +1,20 @@
-# 全参构造(也可以使用其它重载的构造方法，使用默认值创建页面)
+# LWJGLwindows
+这是一个用于在Minecraft中创建独立窗口的LWJGL窗口封装库旨在解决因Minecraft不同版本间原生GUI类如Screen的差异而需频繁修改自定义GUI代码的问题。
+
+# 文档主页：https://ohhapple.github.io/
+
+导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'           include 'com.github.ohhapple:LWJGLwindows:版本号'
+
+include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
+# 大致流程图
+不同版本间可能调整，请自行探索
+![流程图](LWJGLwindows_Flowchart.png "LWJGLwindows_Flowchart")
+# 狭义全参构造(也可以使用其它重载的构造方法，使用默认值创建页面)
+所谓的全参构造并不代表UI组件的所有参数，部分参数有默认值，可通过相关set方法设置，此处列出全参构造仅供参考使用
+
+不推荐直接使用全参构造，推荐使用参数更少的方法重载初始化UI组件，然后通过相关set方法设置参数
+
+多数情况下，参数的默认值是符合大多数情况的，但请自行探索
 ~~~
         // 文本框全参构造
         public TextField(int x, int y, int w, int h, String p, int fontSize,//x坐标 y坐标 宽度w 高度h 默认显示提示文字 输入文字大小
@@ -57,11 +73,12 @@ minecraft客户端实例自行导入，该示例代码基于CarpetPlus项目
 package com.ohhapple.carpetplus.gui.test;
 
 import com.ohhapple.carpetplus.client.CarpetPLUSClient;
-import com.ohhapple.carpetplus.gui.Font.FontRenderer;
 import com.ohhapple.carpetplus.gui.util.*;
 
-public class ExamplePage {
 
+
+public class ExamplePage {
+    //Minecraft客户端主线程设置可选方案1，本示例未使用
     public static class MyMcAccess implements IMinecraftAccess {
         @Override
         public void execute(Runnable task) {
@@ -70,23 +87,27 @@ public class ExamplePage {
     }
 
     public static void openDemoPage() {
+        //Minecraft客户端主线程设置可选方案2
         IMinecraftAccess mc = task -> CarpetPLUSClient.minecraftClient.execute(task);
 
-        // 可选：设置窗口图标
+        // 可选设置：设置窗口图标
         BaseGuiWindow.setWindowIcon("/assets/carpetplus/icon.png");
 
-        GuiWindows.open(mc, "演示窗口", 700, 600, win -> {
-              //可选：页面背景色rgb
+        GuiWindows.open(mc, "演示窗口", 700, 600, win->{
+            // 可选设置：页面背景色rgb
             win.setBackgroundColor(0.1f, 0.1f, 0.15f);
-            // 标题（自定义组件）
+            // 可选设置：设置FPS，不设置表示默认60FPS，传入0或负数表示阻塞渲染线程直到该窗口有事件发生（例如点击事件）
+            win.setTargetFPS(30);
+            // 可选设置：是否开启垂直同步，不设置表示该选项默认为true
+            win.setVsyncEnabled(true);
+            // 可选设置：标题（自定义组件）- 使用 win.fontRenderer
             win.addComponent(win.new UIComponent(0, 0, win.windowWidth, 50) {
                 @Override
                 public void render(long handle, boolean hovered) {
-                    FontRenderer.drawText(handle, "演示窗口",
+                    win.fontRenderer.drawText(handle, "演示窗口",
                             win.windowWidth / 2f, 30, 32, 1, 1, 1);
                 }
             });
-
 
             // ---- 音量滑块 ----
             BaseGuiWindow.Slider volumeSlider = win.new Slider(350, 150, 300, 15, 0.7f, value -> {
@@ -94,31 +115,30 @@ public class ExamplePage {
             });
             volumeSlider.setShowValue(true);
             volumeSlider.setValueFontSize(18);
-            volumeSlider.setValueColor(0.8f, 0.9f, 1.0f); // 淡蓝色数值
-            volumeSlider.setFillColor(0.2f, 0.8f, 0.6f);  // 绿色填充
+            volumeSlider.setValueColor(0.8f, 0.9f, 1.0f);
+            volumeSlider.setFillColor(0.2f, 0.8f, 0.6f);
             win.addComponent(volumeSlider);
 
-            // ---- 另一个滑块，不显示数值，自定义颜色 ----
+            // ---- 另一个滑块，不显示数值 ----
             BaseGuiWindow.Slider effectSlider = win.new Slider(350, 170, 300, 15, 0.3f);
             effectSlider.setShowValue(false);
-            effectSlider.setFillColor(0.9f, 0.6f, 0.2f); // 橙色
+            effectSlider.setFillColor(0.9f, 0.6f, 0.2f);
             effectSlider.setChangeListener(val -> {
-                // 执行特效强度调整
                 System.out.println("特效强度: " + val);
             });
             win.addComponent(effectSlider);
 
             // ----- 文本框：指定字体大小 22，文字颜色浅蓝色 -----
             BaseGuiWindow.TextField searchField = win.new TextField(50, 90, 600, 45, "搜索...", 22, 0.6f, 0.8f, 1.0f);
-            searchField.setPlaceholderColor(0.5f, 0.5f, 0.5f); // 占位符灰色
+            searchField.setPlaceholderColor(0.5f, 0.5f, 0.5f);
             searchField.setEnterListener(text -> System.out.println("回车搜索：" + text));
             win.addComponent(searchField);
-            // 可选：设置初始焦点
+            // 可选设置：设置该文本框初始拥有焦点
             win.focusedComponent = searchField;
 
             // ----- 按钮1：默认白色字体，自动截断长文本 -----
             BaseGuiWindow.Button searchBtn = win.new Button(50, 150, 120, 40, "这是一个非常非常长的搜索按钮文本",
-                    () -> System.out.println("搜索：" + searchField.getText()));
+                    () -> {System.out.println("搜索：" + searchField.getText());});
             searchBtn.setFontSize(20);
             win.addComponent(searchBtn);
 
@@ -127,7 +147,7 @@ public class ExamplePage {
                     () -> System.out.println("彩色按钮点击"), 28, 1.0f, 0.6f, 0.2f);
             win.addComponent(colorBtn);
 
-            // 滚动容器（无文字颜色需求，仅使用默认构造参数）
+            // 滚动容器
             BaseGuiWindow.ScrollContainer resultList = win.new ScrollContainer(50, 210, 600, 300);
             for (int i = 0; i < 50; i++) {
                 int idx = i;

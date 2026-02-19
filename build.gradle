@@ -20,14 +20,14 @@ dependencies {
     // ----- 版本统一管理（必加）-----
     api platform("org.lwjgl:lwjgl-bom:3.3.3")
 
-    // ----- 核心模块（全部用 api，因为你是在封装给别人用）-----
+    // ----- 核心模块（全部用 api，封装给别人用）-----
     api "org.lwjgl:lwjgl"
     api "org.lwjgl:lwjgl-glfw"
     api "org.lwjgl:lwjgl-opengl"
     api "org.lwjgl:lwjgl-stb"
-    api "org.lwjgl:lwjgl-freetype"      // ← 就是你刚加的那行 import 需要的
+    api "org.lwjgl:lwjgl-freetype"
 
-    // ----- 全平台 natives（你的用户零配置，开箱即用）-----
+    // ----- 全平台 natives（用户零配置，开箱即用）-----
     runtimeOnly "org.lwjgl:lwjgl::natives-windows"
     runtimeOnly "org.lwjgl:lwjgl::natives-linux"
     runtimeOnly "org.lwjgl:lwjgl::natives-macos"
@@ -40,7 +40,7 @@ dependencies {
     runtimeOnly "org.lwjgl:lwjgl-stb::natives-windows"
     runtimeOnly "org.lwjgl:lwjgl-stb::natives-linux"
     runtimeOnly "org.lwjgl:lwjgl-stb::natives-macos"
-    runtimeOnly "org.lwjgl:lwjgl-freetype::natives-windows"   // ← FreeType natives
+    runtimeOnly "org.lwjgl:lwjgl-freetype::natives-windows"
     runtimeOnly "org.lwjgl:lwjgl-freetype::natives-linux"
     runtimeOnly "org.lwjgl:lwjgl-freetype::natives-macos"
 }

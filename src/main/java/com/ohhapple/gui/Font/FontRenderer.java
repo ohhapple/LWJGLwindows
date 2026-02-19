@@ -1,5 +1,20 @@
 /*
  * Copyright (C) 2026 ohhapple
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+ *
+ * SPDX-License-Identifier: LGPL-3.0
  */
 
 package com.ohhapple.gui.Font;
@@ -83,17 +98,17 @@ public class FontRenderer {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             PointerBuffer libBuf = stack.mallocPointer(1);
             int error = FreeType.FT_Init_FreeType(libBuf);
-            if (error != 0) throw new RuntimeException("FT_Init_FreeType 失败，错误码: " + error);
+            if (error != 0) throw new RuntimeException("FT_Init_FreeType failed, error code: " + error);
             library = libBuf.get(0);
         }
 
         fontBuffer = loadFontFile();
-        if (fontBuffer == null) throw new RuntimeException("无法加载字体文件: assets/LWJGLwindows/font/simhei.ttf");
+        if (fontBuffer == null) throw new RuntimeException("Unable to load font file: assets/LWJGLwindows/font/simhei.ttf");
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
             PointerBuffer faceBuf = stack.mallocPointer(1);
             int error = FreeType.FT_New_Memory_Face(library, fontBuffer, 0, faceBuf);
-            if (error != 0) throw new RuntimeException("FT_New_Memory_Face 失败，错误码: " + error);
+            if (error != 0) throw new RuntimeException("FT_New_Memory_Face failed, error code: " + error);
             face = FT_Face.create(faceBuf.get(0));
         }
 
@@ -125,7 +140,11 @@ public class FontRenderer {
             FreeType.FT_Done_FreeType(library);
             library = 0;
         }
-        fontBuffer = null;
+        // 显式释放字体缓冲区（帮助 GC）
+        if (fontBuffer != null) {
+            // 直接缓冲区将由 GC 回收，但置空引用有助于 GC
+            fontBuffer = null;
+        }
         initialized = false;
     }
 
@@ -221,7 +240,7 @@ public class FontRenderer {
             glyph = glyphCache.get(key);
             if (glyph != null) return glyph;
 
-            if (face == null) throw new IllegalStateException("字体未初始化");
+            if (face == null) throw new IllegalStateException("Font not initialized");
 
             int error = FreeType.FT_Set_Pixel_Sizes(face, size, size);
             if (error != 0) {

@@ -1,5 +1,20 @@
 /*
  * Copyright (C) 2026 ohhapple
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+ *
+ * SPDX-License-Identifier: LGPL-3.0
  */
 
 package com.ohhapple.gui.util;
@@ -41,11 +56,11 @@ public class IconLoader implements AutoCloseable {
         byte[] bytes;
         try (InputStream is = IconLoader.class.getResourceAsStream(resourcePath)) {
             if (is == null) {
-                throw new RuntimeException("图标资源不存在: " + resourcePath);
+                throw new RuntimeException("Icon resource does not exist: " + resourcePath);
             }
             bytes = is.readAllBytes();
         } catch (IOException e) {
-            throw new RuntimeException("读取图标资源失败", e);
+            throw new RuntimeException("Failed to load icon resource", e);
         }
 
         ByteBuffer imageBuffer = ByteBuffer.allocateDirect(bytes.length);
@@ -60,7 +75,7 @@ public class IconLoader implements AutoCloseable {
             // 强制加载为4通道RGBA
             ByteBuffer rgbaPixels = STBImage.stbi_load_from_memory(imageBuffer, w, h, comp, 4);
             if (rgbaPixels == null) {
-                throw new RuntimeException("STBImage解码失败: " + STBImage.stbi_failure_reason());
+                throw new RuntimeException("STBImage decoding failed: " + STBImage.stbi_failure_reason());
             }
 
             return new IconLoader(rgbaPixels, w.get(), h.get());
