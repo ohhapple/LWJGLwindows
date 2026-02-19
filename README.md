@@ -4,11 +4,13 @@
 # 文档主页：https://ohhapple.github.io
 # 建议使用最新版本，可通过tag时间查看，一个tag代表一个版本，tag名称为版本号
 
-导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'
+本依赖库已发布在jitpack，在gradle配置文件repositories中引入jitpack仓库：maven { url 'https://jitpack.io' }
 
-打包进jar：include 'com.github.ohhapple:LWJGLwindows:版本号'
+导入gradle依赖，在gradle配置文件dependencies中导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'
 
-include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
+打包进jar，在gradle配置文件dependencies中导入依赖后加入：include 'com.github.ohhapple:LWJGLwindows:版本号'
+
+或直接在gradle配置文件dependencies中加入：include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
 # 大致流程图
 不同版本间可能调整，请自行探索
 ![流程图](LWJGLwindows_Flowchart.png "LWJGLwindows_Flowchart")
