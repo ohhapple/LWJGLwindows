@@ -25,7 +25,7 @@ macos运行环境：runtimeOnly "org.lwjgl:lwjgl-opengl::natives-macos:3.3.3"
 添加了阻塞式关闭所有窗口的方法：：GuiWindows.shutdown()
 # 大致流程图
 不同版本间可能调整，请自行探索
-![流程图](LWJGLwindows_Flowchart1.png "LWJGLwindows_Flowchart")
+![流程图](LWJGLwindows_Flowchart.png "LWJGLwindows_Flowchart")
 # 狭义全参构造(也可以使用其它重载的构造方法，使用默认值创建页面)
 所谓的全参构造并不代表UI组件的所有参数，部分参数有默认值，可通过相关set方法设置，此处列出全参构造仅供参考使用
 
