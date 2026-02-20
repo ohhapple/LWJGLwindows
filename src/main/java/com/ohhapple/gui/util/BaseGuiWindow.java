@@ -204,7 +204,7 @@ public abstract class BaseGuiWindow {
         GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, 4);
 
         if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
-            GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "carpetplus");
+            GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "LWJGLwindows");
         }
 
         long newWindow = GLFW.glfwCreateWindow(windowWidth, windowHeight, title, 0, 0);

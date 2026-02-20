@@ -6,7 +6,7 @@ group = 'com.github.ohhapple' // ⚠️ 替换为你的 GitHub 用户名（小�
 version = '1.0.0'                        // 版本号，最终会被 git tag 覆盖，但这里写一个默认值
 
 java {
-    withSourcesJar()                     // ⚠️ 强烈推荐：生成源码 jar，方便用户调试
+    withSourcesJar()                     //生成源码 jar，方便用户调试
     withJavadocJar()                    // 可选，生成 javadoc jar
     sourceCompatibility = JavaVersion.VERSION_21  // 根据你的 JDK 版本调整
     targetCompatibility = JavaVersion.VERSION_21

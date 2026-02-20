@@ -11,6 +11,18 @@
 打包进jar，在gradle配置文件dependencies中导入依赖后加入：include 'com.github.ohhapple:LWJGLwindows:版本号'
 
 或直接在gradle配置文件dependencies中加入：include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
+
+理论上，倘若有一天MC彻底弃用了opengl，开发者手动在gradle配置文件中导入opengl，本库仍可以正常使用
+
+例如：implementation "org.lwjgl:lwjgl-opengl:3.3.3"
+
+windows运行环境：runtimeOnly "org.lwjgl:lwjgl-opengl::natives-windows:3.3.3"
+
+linux运行环境：runtimeOnly "org.lwjgl:lwjgl-opengl::natives-linux:3.3.3"
+
+macos运行环境：runtimeOnly "org.lwjgl:lwjgl-opengl::natives-macos:3.3.3"
+
+添加了阻塞式关闭所有窗口的方法：：GuiWindows.shutdown()
 # 大致流程图
 不同版本间可能调整，请自行探索
 ![流程图](LWJGLwindows_Flowchart.png "LWJGLwindows_Flowchart")
