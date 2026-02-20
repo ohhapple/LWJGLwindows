@@ -1,11 +1,16 @@
 # LWJGLwindows
 这是一个用于在Minecraft中创建独立窗口的LWJGL窗口封装库旨在解决因Minecraft不同版本间原生GUI类如Screen的差异而需频繁修改自定义GUI代码的问题。
 
-# 文档主页：https://ohhapple.github.io/
+# 文档主页：https://ohhapple.github.io
+# 建议使用最新版本，可通过tag时间查看，一个tag代表一个版本，tag名称为版本号
 
-导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'           include 'com.github.ohhapple:LWJGLwindows:版本号'
+本依赖库已发布在jitpack，在gradle配置文件repositories中引入jitpack仓库：maven { url 'https://jitpack.io' }
 
-include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
+导入gradle依赖，在gradle配置文件dependencies中导入依赖：implementation 'com.github.ohhapple:LWJGLwindows:版本号'
+
+打包进jar，在gradle配置文件dependencies中导入依赖后加入：include 'com.github.ohhapple:LWJGLwindows:版本号'
+
+或直接在gradle配置文件dependencies中加入：include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
 # 大致流程图
 不同版本间可能调整，请自行探索
 ![流程图](LWJGLwindows_Flowchart.png "LWJGLwindows_Flowchart")
@@ -48,7 +53,7 @@ include(implementation("com.github.ohhapple:LWJGLwindows:版本号"))
                                float borderR, float borderG, float borderB) //边框色
 ~~~
 # 示例(仅展示部分方法调用，其它方法自行探索)
-minecraft客户端实例自行导入，该示例代码基于CarpetPlus项目
+该示例代码基于CarpetPlus项目，仅作为展示，实际设计中建议设计成单例，在退出世界后时建议调用GuiWindows.shutdown()阻塞式关闭所有窗口或调用GuiWindows.closeAllwindows()非阻塞式关闭所有窗口
 ~~~
 /*
  * This file is part of the CarpetPlus project, licensed under the
@@ -72,35 +77,24 @@ minecraft客户端实例自行导入，该示例代码基于CarpetPlus项目
 
 package com.ohhapple.carpetplus.gui.test;
 
-import com.ohhapple.carpetplus.client.CarpetPLUSClient;
-import com.ohhapple.carpetplus.gui.util.*;
-
-
+import com.ohhapple.carpetplus.gui.util.BaseGuiWindow;
+import com.ohhapple.carpetplus.gui.util.GuiWindows;
 
 public class ExamplePage {
-    //Minecraft客户端主线程设置可选方案1，本示例未使用
-    public static class MyMcAccess implements IMinecraftAccess {
-        @Override
-        public void execute(Runnable task) {
-            CarpetPLUSClient.minecraftClient.execute(task);
-        }
-    }
 
     public static void openDemoPage() {
-        //Minecraft客户端主线程设置可选方案2
-        IMinecraftAccess mc = task -> CarpetPLUSClient.minecraftClient.execute(task);
-
         // 可选设置：设置窗口图标
         BaseGuiWindow.setWindowIcon("/assets/carpetplus/icon.png");
 
-        GuiWindows.open(mc, "演示窗口", 700, 600, win->{
-            // 可选设置：页面背景色rgb
+        GuiWindows.open("演示窗口", 700, 600, win -> {
+            // 可选设置：页面背景色
             win.setBackgroundColor(0.1f, 0.1f, 0.15f);
-            // 可选设置：设置FPS，不设置表示默认60FPS，传入0或负数表示阻塞渲染线程直到该窗口有事件发生（例如点击事件）
+            // 可选设置：目标帧率（30 FPS）
             win.setTargetFPS(30);
-            // 可选设置：是否开启垂直同步，不设置表示该选项默认为true
+            // 可选设置：垂直同步
             win.setVsyncEnabled(true);
-            // 可选设置：标题（自定义组件）- 使用 win.fontRenderer
+
+            // 标题组件
             win.addComponent(win.new UIComponent(0, 0, win.windowWidth, 50) {
                 @Override
                 public void render(long handle, boolean hovered) {
@@ -109,7 +103,7 @@ public class ExamplePage {
                 }
             });
 
-            // ---- 音量滑块 ----
+            // 音量滑块
             BaseGuiWindow.Slider volumeSlider = win.new Slider(350, 150, 300, 15, 0.7f, value -> {
                 System.out.println("当前音量: " + Math.round(value * 100) + "%");
             });
@@ -119,7 +113,7 @@ public class ExamplePage {
             volumeSlider.setFillColor(0.2f, 0.8f, 0.6f);
             win.addComponent(volumeSlider);
 
-            // ---- 另一个滑块，不显示数值 ----
+            // 另一个滑块
             BaseGuiWindow.Slider effectSlider = win.new Slider(350, 170, 300, 15, 0.3f);
             effectSlider.setShowValue(false);
             effectSlider.setFillColor(0.9f, 0.6f, 0.2f);
@@ -128,23 +122,24 @@ public class ExamplePage {
             });
             win.addComponent(effectSlider);
 
-            // ----- 文本框：指定字体大小 22，文字颜色浅蓝色 -----
-            BaseGuiWindow.TextField searchField = win.new TextField(50, 90, 600, 45, "搜索...", 22, 0.6f, 0.8f, 1.0f);
+            // 文本框
+            BaseGuiWindow.TextField searchField = win.new TextField(50, 90, 600, 45,
+                    "搜索...", 22, 0.6f, 0.8f, 1.0f);
             searchField.setPlaceholderColor(0.5f, 0.5f, 0.5f);
             searchField.setEnterListener(text -> System.out.println("回车搜索：" + text));
             win.addComponent(searchField);
-            // 可选设置：设置该文本框初始拥有焦点
-            win.focusedComponent = searchField;
+            // 可选设置：初始焦点
+            win.focusedComponent = searchField; 
 
-            // ----- 按钮1：默认白色字体，自动截断长文本 -----
-            BaseGuiWindow.Button searchBtn = win.new Button(50, 150, 120, 40, "这是一个非常非常长的搜索按钮文本",
-                    () -> {System.out.println("搜索：" + searchField.getText());});
-            searchBtn.setFontSize(20);
+            // 按钮1（长文本自动截断）
+            BaseGuiWindow.Button searchBtn = win.new Button(50, 150, 120, 40,
+                    "这是一个非常非常长的搜索按钮文本",
+                    () -> System.out.println("搜索：" + searchField.getText()), 20);
             win.addComponent(searchBtn);
 
-            // ----- 按钮2：指定字体大小28，文字颜色橙色 -----
-            BaseGuiWindow.Button colorBtn = win.new Button(200, 150, 120, 45, "彩色按钮",
-                    () -> System.out.println("彩色按钮点击"), 28, 1.0f, 0.6f, 0.2f);
+            // 按钮2（彩色文字）
+            BaseGuiWindow.Button colorBtn = win.new Button(200, 150, 120, 45,
+                    "彩色按钮", () -> System.out.println("彩色按钮点击"), 28, 1.0f, 0.6f, 0.2f);
             win.addComponent(colorBtn);
 
             // 滚动容器

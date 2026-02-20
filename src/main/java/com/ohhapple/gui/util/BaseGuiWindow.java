@@ -37,13 +37,11 @@ import java.util.function.Consumer;
 
 public abstract class BaseGuiWindow {
 
-    // -------------------- 依赖注入 --------------------
-    protected final IMinecraftAccess mc;
+    // -------------------- 窗口状态 --------------------
     protected final String title;
     public volatile int windowWidth;
     public volatile int windowHeight;
 
-    // -------------------- 窗口状态 --------------------
     private final AtomicBoolean isOpen = new AtomicBoolean(false);
     private final AtomicBoolean isCreated = new AtomicBoolean(false);
     private final AtomicLong windowHandle = new AtomicLong(0L);
@@ -52,9 +50,6 @@ public abstract class BaseGuiWindow {
 
     private volatile Double waitTimeoutSeconds = 0.016; // 默认 16ms 超时（≈60 FPS）
     private volatile boolean vsyncEnabled = true;       // 默认开启垂直同步
-
-    // -------------------- 主窗口句柄 --------------------
-    private final AtomicLong mcWindowHandle = new AtomicLong(0L);
 
     // -------------------- UI 组件管理 --------------------
     protected final List<UIComponent> uiComponents = new CopyOnWriteArrayList<>();
@@ -83,11 +78,6 @@ public abstract class BaseGuiWindow {
     private GLFWCharCallback charCallback;
     private GLFWWindowSizeCallback windowSizeCallback;
 
-    // -------------------- 主窗口关闭回调相关 --------------------
-    private static GLFWWindowCloseCallback originalMainWindowCloseCallback;
-    private static GLFWWindowCloseCallback ourMainWindowCloseCallback;
-    private static boolean mainWindowCloseCallbackSet = false;
-
     // -------------------- 全局错误回调相关 --------------------
     private static int windowCount = 0;
     private static GLFWErrorCallback originalErrorCallback;
@@ -97,29 +87,23 @@ public abstract class BaseGuiWindow {
     private boolean glCapabilitiesCreated = false;
 
     // -------------------- 构造方法 --------------------
-    public BaseGuiWindow(IMinecraftAccess mc, String title, int width, int height) {
-        this.mc = mc;
+    public BaseGuiWindow(String title, int width, int height) {
         this.title = title;
         this.windowWidth = width;
         this.windowHeight = height;
-
-        // 在主线程获取当前窗口句柄（Minecraft 主窗口）
-        mc.execute(() -> {
-            long handle = GLFW.glfwGetCurrentContext();
-            mcWindowHandle.set(handle);
-        });
     }
 
     // -------------------- 公共生命周期控制 --------------------
     public final void open() {
         if (isOpen.getAndSet(true)) return;
-        mc.execute(this::createWindowInRenderThread);
+        renderThread = new Thread(this::runRenderLoop, "GUI-" + (++windowCount) + "-" + title);
+        renderThread.setDaemon(true);
+        renderThread.start();
     }
 
     public final void close() {
         if (!isOpen.getAndSet(false)) return;
         if (windowHandle.get() != 0) GLFW.glfwPostEmptyEvent();
-        mc.execute(this::destroyWindowInRenderThread);
     }
 
     public final boolean isOpen() { return isOpen.get() && isCreated.get(); }
@@ -133,9 +117,7 @@ public abstract class BaseGuiWindow {
     public final void removeComponent(UIComponent comp) { uiComponents.remove(comp); }
     public final void clearComponents() { uiComponents.clear(); }
 
-    // -------------------- 窗口等待机制与帧率设置--------------------
-
-    // 通过目标帧率设置超时时间（例如 targetFPS = 60 则超时 1/60 ≈ 0.0167 秒）传入 null 表示使用 glfwWaitEvents() 无限等待
+    // -------------------- 窗口等待机制与帧率设置 --------------------
     public void setTargetFPS(int fps) {
         if (fps <= 0) {
             setWaitTimeout(null); // 无限等待
@@ -144,138 +126,23 @@ public abstract class BaseGuiWindow {
         }
     }
 
-    // 启用/禁用垂直同步
     public void setVsyncEnabled(boolean enabled) {
         this.vsyncEnabled = enabled;
     }
 
-    // 设置等待超时（秒）。传入 null 表示使用 glfwWaitEvents() 无限等待
     private void setWaitTimeout(Double timeoutSeconds) {
         this.waitTimeoutSeconds = timeoutSeconds;
     }
 
-    // -------------------- 窗口创建（内部，在主线程执行）--------------------
-    private void createWindowInRenderThread() {
-        long mainWindow = mcWindowHandle.get();
-        if (mainWindow == 0) {
+    // -------------------- 渲染线程主循环 --------------------
+    private void runRenderLoop() {
+        long handle = createWindow();
+        if (handle == 0) {
             isOpen.set(false);
             return;
         }
-
-        GLFW.glfwDefaultWindowHints();
-        GLFW.glfwWindowHint(GLFW.GLFW_VISIBLE, GLFW.GLFW_FALSE);
-        GLFW.glfwWindowHint(GLFW.GLFW_RESIZABLE, GLFW.GLFW_TRUE);
-        GLFW.glfwWindowHint(GLFW.GLFW_DECORATED, GLFW.GLFW_TRUE);
-        GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 2);
-        GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 1);
-        GLFW.glfwWindowHint(GLFW.GLFW_ALPHA_BITS, 8);
-        GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, 4);
-
-        // Wayland 平台特殊处理
-        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
-            GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "LWJGLwindows");
-        }
-
-        // 创建独立上下文窗口（不共享主窗口上下文）
-        long newWindow = GLFW.glfwCreateWindow(windowWidth, windowHeight, title, 0, 0);
-        if (newWindow == 0) {
-            isOpen.set(false);
-            return;
-        }
-
-        // 设置窗口图标
-        if (windowIconPath != null && !windowIconPath.isEmpty()) {
-            setWindowIconInternal(newWindow, windowIconPath);
-        }
-
-        // 居中显示
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            IntBuffer mX = stack.mallocInt(1), mY = stack.mallocInt(1);
-            IntBuffer mW = stack.mallocInt(1), mH = stack.mallocInt(1);
-            IntBuffer wW = stack.mallocInt(1), wH = stack.mallocInt(1);
-            long monitor = GLFW.glfwGetPrimaryMonitor();
-            GLFW.glfwGetMonitorWorkarea(monitor, mX, mY, mW, mH);
-            GLFW.glfwGetWindowSize(newWindow, wW, wH);
-            int posX = mX.get(0) + (mW.get(0) - wW.get(0)) / 2;
-            int posY = mY.get(0) + (mH.get(0) - wH.get(0)) / 2;
-            GLFW.glfwSetWindowPos(newWindow, posX, posY);
-        }
-
-        windowHandle.set(newWindow);
+        windowHandle.set(handle);
         isCreated.set(true);
-        GLFW.glfwShowWindow(newWindow);
-
-        // 设置全局错误回调（仅在第一个窗口创建成功时）
-        synchronized (BaseGuiWindow.class) {
-            windowCount++;
-            if (windowCount == 1) {
-                globalErrorCallback = GLFWErrorCallback.create((error, description) -> {
-                    if (handlingError.compareAndSet(false, true)) {
-                        try {
-                            String descStr = description != 0 ? MemoryUtil.memUTF8(description) : "null";
-                            System.err.println("[GUI GLFW Error] " + error + ": " + descStr);
-                            new ArrayList<>(GuiWindows.getWindows().keySet()).forEach(BaseGuiWindow::close);
-                        } finally {
-                            handlingError.set(false);
-                        }
-                    }
-                });
-                originalErrorCallback = GLFW.glfwSetErrorCallback(globalErrorCallback);
-            }
-        }
-
-        // 设置主窗口关闭回调（仅第一次）
-        synchronized (BaseGuiWindow.class) {
-            if (!mainWindowCloseCallbackSet) {
-                originalMainWindowCloseCallback = GLFW.glfwSetWindowCloseCallback(mainWindow, null);
-                ourMainWindowCloseCallback = GLFWWindowCloseCallback.create((window) -> {
-                    if (originalMainWindowCloseCallback != null) {
-                        originalMainWindowCloseCallback.invoke(window);
-                    }
-                    GuiWindows.closeAllwindows();
-                });
-                GLFW.glfwSetWindowCloseCallback(mainWindow, ourMainWindowCloseCallback);
-                mainWindowCloseCallbackSet = true;
-            }
-        }
-
-        // 初始化 UI 组件
-        initUIComponents();
-        relayoutComponents(windowWidth, windowHeight);
-        startRenderLoop();
-    }
-
-    private void setWindowIconInternal(long windowHandle, String iconPath) {
-        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_COCOA) {
-            System.out.println("[GUI] macOS The window does not support custom icons, skipped.");
-            return;
-        }
-        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
-            return;
-        }
-        try (IconLoader icon = IconLoader.loadFromResources(iconPath)) {
-            GLFWImage glfwImage = GLFWImage.malloc();
-            glfwImage.set(icon.getWidth(), icon.getHeight(), icon.getPixels());
-            GLFWImage.Buffer imageBuffer = GLFWImage.malloc(1);
-            imageBuffer.put(0, glfwImage);
-            GLFW.glfwSetWindowIcon(windowHandle, imageBuffer);
-            glfwImage.free();
-            imageBuffer.free();
-        } catch (Exception e) {
-            System.err.println("[GUI] Failed to set window icon: " + e.getMessage());
-        }
-    }
-
-    private void startRenderLoop() {
-        renderThread = new Thread(this::renderLoop, "GUI-"+windowCount+"-" + title);
-        renderThread.setDaemon(true);
-        renderThread.start();
-    }
-
-    // 渲染循环
-    private void renderLoop() {
-        long handle = windowHandle.get();
-        if (handle == 0) return;
 
         GLFW.glfwMakeContextCurrent(handle);
 
@@ -299,11 +166,9 @@ public abstract class BaseGuiWindow {
         setupInputCallbacks(handle);
 
         while (isOpen.get() && !Thread.currentThread().isInterrupted()) {
-            long currentHandle = windowHandle.get();
-            if (currentHandle == 0 || GLFW.glfwWindowShouldClose(currentHandle)) break;
-
-            if (GLFW.glfwGetCurrentContext() != currentHandle) {
-                GLFW.glfwMakeContextCurrent(currentHandle);
+            if (GLFW.glfwWindowShouldClose(handle)) {
+                close(); // 触发关闭标志，下次循环退出
+                continue;
             }
 
             GL11.glViewport(0, 0, windowWidth, windowHeight);
@@ -314,9 +179,9 @@ public abstract class BaseGuiWindow {
             GL11.glLoadIdentity();
 
             GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
-            renderAll(currentHandle);
+            renderAll(handle);
 
-            GLFW.glfwSwapBuffers(currentHandle);
+            GLFW.glfwSwapBuffers(handle);
             if (waitTimeoutSeconds == null) {
                 GLFW.glfwWaitEvents();
             } else {
@@ -324,13 +189,92 @@ public abstract class BaseGuiWindow {
             }
         }
 
-        // 渲染线程退出，清理字体资源
-        if (fontRenderer != null) {
-            fontRenderer.cleanup();
-            fontRenderer = null;
+        // 渲染线程退出，执行清理
+        cleanupWindow(handle);
+    }
+
+    private long createWindow() {
+        GLFW.glfwDefaultWindowHints();
+        GLFW.glfwWindowHint(GLFW.GLFW_VISIBLE, GLFW.GLFW_FALSE);
+        GLFW.glfwWindowHint(GLFW.GLFW_RESIZABLE, GLFW.GLFW_TRUE);
+        GLFW.glfwWindowHint(GLFW.GLFW_DECORATED, GLFW.GLFW_TRUE);
+        GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 2);
+        GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 1);
+        GLFW.glfwWindowHint(GLFW.GLFW_ALPHA_BITS, 8);
+        GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, 4);
+
+        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
+            GLFW.glfwWindowHintString(GLFW.GLFW_WAYLAND_APP_ID, "carpetplus");
         }
-        // 释放 OpenGL 上下文
-        GLFW.glfwMakeContextCurrent(0);
+
+        long newWindow = GLFW.glfwCreateWindow(windowWidth, windowHeight, title, 0, 0);
+        if (newWindow == 0) {
+            return 0;
+        }
+
+        if (windowIconPath != null && !windowIconPath.isEmpty()) {
+            setWindowIconInternal(newWindow, windowIconPath);
+        }
+
+        // 居中显示
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer mX = stack.mallocInt(1), mY = stack.mallocInt(1);
+            IntBuffer mW = stack.mallocInt(1), mH = stack.mallocInt(1);
+            IntBuffer wW = stack.mallocInt(1), wH = stack.mallocInt(1);
+            long monitor = GLFW.glfwGetPrimaryMonitor();
+            GLFW.glfwGetMonitorWorkarea(monitor, mX, mY, mW, mH);
+            GLFW.glfwGetWindowSize(newWindow, wW, wH);
+            int posX = mX.get(0) + (mW.get(0) - wW.get(0)) / 2;
+            int posY = mY.get(0) + (mH.get(0) - wH.get(0)) / 2;
+            GLFW.glfwSetWindowPos(newWindow, posX, posY);
+        }
+
+        GLFW.glfwShowWindow(newWindow);
+
+        // 设置全局错误回调（仅在第一个窗口创建成功时）
+        synchronized (BaseGuiWindow.class) {
+            if (windowCount == 1) {
+                globalErrorCallback = GLFWErrorCallback.create((error, description) -> {
+                    if (handlingError.compareAndSet(false, true)) {
+                        try {
+                            String descStr = description != 0 ? MemoryUtil.memUTF8(description) : "null";
+                            System.err.println("[GUI GLFW Error] " + error + ": " + descStr);
+                            new ArrayList<>(GuiWindows.getWindows().keySet()).forEach(BaseGuiWindow::close);
+                        } finally {
+                            handlingError.set(false);
+                        }
+                    }
+                });
+                originalErrorCallback = GLFW.glfwSetErrorCallback(globalErrorCallback);
+            }
+        }
+
+        // 初始化 UI 组件
+        initUIComponents();
+        relayoutComponents(windowWidth, windowHeight);
+
+        return newWindow;
+    }
+
+    private void setWindowIconInternal(long windowHandle, String iconPath) {
+        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_COCOA) {
+            System.out.println("[GUI] macOS does not support custom window icons, skipped.");
+            return;
+        }
+        if (GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND) {
+            return;
+        }
+        try (IconLoader icon = IconLoader.loadFromResources(iconPath)) {
+            GLFWImage glfwImage = GLFWImage.malloc();
+            glfwImage.set(icon.getWidth(), icon.getHeight(), icon.getPixels());
+            GLFWImage.Buffer imageBuffer = GLFWImage.malloc(1);
+            imageBuffer.put(0, glfwImage);
+            GLFW.glfwSetWindowIcon(windowHandle, imageBuffer);
+            glfwImage.free();
+            imageBuffer.free();
+        } catch (Exception e) {
+            System.err.println("[GUI] Failed to set window icon: " + e.getMessage());
+        }
     }
 
     private void renderAll(long handle) {
@@ -343,94 +287,10 @@ public abstract class BaseGuiWindow {
             }
         }
         for (UIComponent comp : uiComponents) {
-            // 保存当前 OpenGL 状态，防止组件之间相互影响
             GL11.glPushAttrib(GL11.GL_CURRENT_BIT | GL11.GL_ENABLE_BIT | GL11.GL_TEXTURE_BIT | GL11.GL_COLOR_BUFFER_BIT);
             comp.render(handle, comp == hoveredComponent);
             GL11.glPopAttrib();
         }
-    }
-
-    private void destroyWindowInRenderThread() {
-        long handle = windowHandle.get();
-        if (handle == 0) return;
-
-        // 通知渲染循环退出
-        isOpen.set(false);
-        GLFW.glfwPostEmptyEvent();
-
-        // 等待渲染线程退出（最多 500ms）
-        if (renderThread != null) {
-            renderThread.interrupt();
-            try {
-                renderThread.join(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            renderThread = null;
-        }
-
-        // 字体资源已在渲染线程中清理，此处不再操作 OpenGL
-
-        // 释放 GLFW 回调
-        if (windowCloseCallback != null) {
-            GLFW.glfwSetWindowCloseCallback(handle, null);
-            windowCloseCallback.close();
-            windowCloseCallback = null;
-        }
-        if (cursorPosCallback != null) {
-            GLFW.glfwSetCursorPosCallback(handle, null);
-            cursorPosCallback.close();
-            cursorPosCallback = null;
-        }
-        if (mouseButtonCallback != null) {
-            GLFW.glfwSetMouseButtonCallback(handle, null);
-            mouseButtonCallback.close();
-            mouseButtonCallback = null;
-        }
-        if (scrollCallback != null) {
-            GLFW.glfwSetScrollCallback(handle, null);
-            scrollCallback.close();
-            scrollCallback = null;
-        }
-        if (keyCallback != null) {
-            GLFW.glfwSetKeyCallback(handle, null);
-            keyCallback.close();
-            keyCallback = null;
-        }
-        if (charCallback != null) {
-            GLFW.glfwSetCharCallback(handle, null);
-            charCallback.close();
-            charCallback = null;
-        }
-        if (windowSizeCallback != null) {
-            GLFW.glfwSetWindowSizeCallback(handle, null);
-            windowSizeCallback.close();
-            windowSizeCallback = null;
-        }
-
-        // 销毁窗口
-        GLFW.glfwDestroyWindow(handle);
-        GuiWindows.WINDOWS.remove(this);
-
-        // 处理全局错误回调计数
-        GLFW.glfwPollEvents();
-
-        synchronized (BaseGuiWindow.class) {
-            windowCount--;
-            if (windowCount == 0 && globalErrorCallback != null) {
-                GLFW.glfwSetErrorCallback(originalErrorCallback);
-                globalErrorCallback.close();
-                globalErrorCallback = null;
-                originalErrorCallback = null;
-            }
-        }
-
-        // 清空组件
-        uiComponents.clear();
-        hoveredComponent = null;
-        focusedComponent = null;
-        windowHandle.set(0L);
-        isCreated.set(false);
     }
 
     private void setupInputCallbacks(long handle) {
@@ -455,7 +315,6 @@ public abstract class BaseGuiWindow {
                     break;
                 }
             }
-            // 如果没有组件处理点击，且是鼠标左键按下，则清除焦点
             if (!handled && btn == GLFW.GLFW_MOUSE_BUTTON_LEFT && act == GLFW.GLFW_PRESS) {
                 if (focusedComponent != null) {
                     if (focusedComponent instanceof TextField) {
@@ -520,6 +379,92 @@ public abstract class BaseGuiWindow {
                 break;
             }
         }
+    }
+
+
+    /**
+     * 同步关闭窗口：等待渲染线程彻底退出后再返回
+     * 注意：不能在渲染线程中调用此方法，否则会死锁
+     */
+    public final void closeAndWait() {
+        if (!isOpen.getAndSet(false)) return;   // 如果已经关闭，直接返回
+        if (windowHandle.get() != 0) {
+            GLFW.glfwPostEmptyEvent();           // 唤醒渲染线程
+        }
+        Thread renderer = renderThread;
+        if (renderer != null && renderer != Thread.currentThread()) {
+            try {
+                renderer.join();                  // 等待渲染线程结束
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private void cleanupWindow(long handle) {
+        // 字体资源清理
+        if (fontRenderer != null) {
+            fontRenderer.cleanup();
+            fontRenderer = null;
+        }
+
+        // 释放 GLFW 回调
+        if (windowCloseCallback != null) {
+            GLFW.glfwSetWindowCloseCallback(handle, null);
+            windowCloseCallback.close();
+            windowCloseCallback = null;
+        }
+        if (cursorPosCallback != null) {
+            GLFW.glfwSetCursorPosCallback(handle, null);
+            cursorPosCallback.close();
+            cursorPosCallback = null;
+        }
+        if (mouseButtonCallback != null) {
+            GLFW.glfwSetMouseButtonCallback(handle, null);
+            mouseButtonCallback.close();
+            mouseButtonCallback = null;
+        }
+        if (scrollCallback != null) {
+            GLFW.glfwSetScrollCallback(handle, null);
+            scrollCallback.close();
+            scrollCallback = null;
+        }
+        if (keyCallback != null) {
+            GLFW.glfwSetKeyCallback(handle, null);
+            keyCallback.close();
+            keyCallback = null;
+        }
+        if (charCallback != null) {
+            GLFW.glfwSetCharCallback(handle, null);
+            charCallback.close();
+            charCallback = null;
+        }
+        if (windowSizeCallback != null) {
+            GLFW.glfwSetWindowSizeCallback(handle, null);
+            windowSizeCallback.close();
+            windowSizeCallback = null;
+        }
+
+        GLFW.glfwDestroyWindow(handle);
+        GuiWindows.WINDOWS.remove(this);
+
+        GLFW.glfwPollEvents();
+
+        synchronized (BaseGuiWindow.class) {
+            windowCount--;
+            if (windowCount == 0 && globalErrorCallback != null) {
+                GLFW.glfwSetErrorCallback(originalErrorCallback);
+                globalErrorCallback.close();
+                globalErrorCallback = null;
+                originalErrorCallback = null;
+            }
+        }
+
+        uiComponents.clear();
+        hoveredComponent = null;
+        focusedComponent = null;
+        windowHandle.set(0L);
+        isCreated.set(false);
     }
 
     // ======================================================================

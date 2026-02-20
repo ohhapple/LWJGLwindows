@@ -27,32 +27,41 @@ public final class GuiWindows {
     protected static final WeakHashMap<BaseGuiWindow, String> WINDOWS = new WeakHashMap<>();
     private GuiWindows() {}
 
-    public static BaseGuiWindow create(IMinecraftAccess mc, String title, int width, int height,
+    public static BaseGuiWindow create(String title, int width, int height,
                                        Consumer<BaseGuiWindow> initializer) {
-        BaseGuiWindow win = new BaseGuiWindow(mc, title, width, height) {
+        BaseGuiWindow win = new BaseGuiWindow(title, width, height) {
             @Override protected void initUIComponents() { initializer.accept(this); }
         };
         WINDOWS.put(win, title);
         return win;
     }
 
-    public static BaseGuiWindow create(IMinecraftAccess mc, String title,
-                                       Consumer<BaseGuiWindow> initializer) {
-        return create(mc, title, 800, 600, initializer);
+    public static BaseGuiWindow create(String title, Consumer<BaseGuiWindow> initializer) {
+        return create(title, 800, 600, initializer);
     }
 
-    public static BaseGuiWindow open(IMinecraftAccess mc, String title, int width, int height,
+    public static BaseGuiWindow open(String title, int width, int height,
                                      Consumer<BaseGuiWindow> initializer) {
-        BaseGuiWindow win = create(mc, title, width, height, initializer);
+        BaseGuiWindow win = create(title, width, height, initializer);
         win.open();
         return win;
     }
 
-    public static BaseGuiWindow open(IMinecraftAccess mc, String title,
-                                     Consumer<BaseGuiWindow> initializer) {
-        return open(mc, title, 800, 600, initializer);
+    public static BaseGuiWindow open(String title, Consumer<BaseGuiWindow> initializer) {
+        return open(title, 800, 600, initializer);
     }
 
-    public static void closeAllwindows() {new WeakHashMap<>(WINDOWS).keySet().forEach(BaseGuiWindow::close);}
-    public static WeakHashMap<BaseGuiWindow, String> getWindows() {return new WeakHashMap<>(WINDOWS);}
+    public static void closeAllwindows() {
+        new WeakHashMap<>(WINDOWS).keySet().forEach(BaseGuiWindow::close);
+    }
+
+    public static WeakHashMap<BaseGuiWindow, String> getWindows() {
+        return new WeakHashMap<>(WINDOWS);
+    }
+
+    /**
+     * 同步关闭所有已打开的窗口，等待它们彻底销毁
+     * 适合在程序退出前调用
+     */
+    public static void shutdown() {new WeakHashMap<>(WINDOWS).keySet().forEach(BaseGuiWindow::closeAndWait);}
 }
